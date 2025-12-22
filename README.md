@@ -14,7 +14,7 @@ A battle-tested guide for replacing SDDM with direct TTY autologin → Hyprland 
   - [Phase 2: Create Fish Login Handler](#phase-2-create-fish-login-handler)
   - [Phase 3: Add hyprlock exec-once](#phase-3-add-hyprlock-exec-once)
   - [Phase 4: Staged Testing](#phase-4-staged-testing)
-  - [Phase 5: Production Cutover](#phase-5-production-cutover)
+  - [Phase 5: Live Cutover](#phase-5-live-cutover)
 - [Recovery Procedures](#recovery-procedures)
 - [Pitfalls & Solutions](#pitfalls--solutions)
 - [Shell Compatibility](#shell-compatibility)
@@ -307,7 +307,7 @@ sudo systemctl start getty@tty2
 - Native Ctrl+Alt+F1-F6 should work
 - If not working, see [VT Switching Issues](#vt-switching-issues)
 
-### Phase 5: Production Cutover
+### Phase 5: Live Cutover
 
 ```bash
 # Step 1: Create autologin systemd override
