@@ -15,6 +15,8 @@ systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Architecture](#architecture)
+  - [Repository Structure](#repository-structure)
+  - [Installation Paths](#installation-paths-where-files-end-up)
 - [Implementation](#implementation)
   - [Phase 1: Create Launcher Script](#phase-1-create-launcher-script)
   - [Phase 2: Create Fish Login Handler](#phase-2-create-fish-login-handler)
@@ -88,7 +90,19 @@ TTY Autologin Way:
 
 ## Architecture
 
-### File Structure
+### Repository Structure
+
+This repo provides ready-to-use files that you copy to your system:
+
+| Repo Path | Copy To | Purpose |
+|-----------|---------|---------|
+| `scripts/fish/hyprland-tty.fish` | `~/.config/hypr/scripts/` | Main launcher script |
+| `scripts/fish/hyprland-autostart.fish` | `~/.config/fish/conf.d/` | Fish login hook |
+| `configs/systemd/autologin.conf` | `/etc/systemd/system/getty@tty1.service.d/` | Autologin override |
+| `configs/hyprland/execs.conf` | Your Hyprland execs config | hyprlock startup |
+| `contrib/systemd/hyprland.service` | *(Optional, untested)* | Alternative systemd approach |
+
+### Installation Paths (Where Files End Up)
 
 | File | Purpose |
 |------|---------|
