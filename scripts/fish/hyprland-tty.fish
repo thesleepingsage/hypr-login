@@ -128,24 +128,27 @@ end
 # ============================================================================
 # GPU-SPECIFIC ENVIRONMENT VARIABLES
 # ============================================================================
-# IMPORTANT: Uncomment ONLY the section matching YOUR GPU!
-# Using the wrong GPU settings will cause issues.
+# DISCLAIMER: You are responsible for knowing which settings are correct for
+# YOUR hardware. The installer tries to detect your GPU, but no guarantees.
+# Verify with: vainfo (from libva-utils package)
 #
-# To check your GPU: for card in /sys/class/drm/card*; test -d $card/device && echo (basename $card): (readlink $card/device/driver | xargs basename); end
+# To check your GPU driver:
+#   for card in /sys/class/drm/card*; test -d $card/device && echo (basename $card): (readlink $card/device/driver | xargs basename); end
+#
+# Reference: https://wiki.archlinux.org/title/Hardware_video_acceleration
 # ============================================================================
 
 # --- NVIDIA GPU ---
-# Uncomment these three lines if you have an NVIDIA GPU:
 # set -gx LIBVA_DRIVER_NAME nvidia
 # set -gx __GLX_VENDOR_LIBRARY_NAME nvidia
 # set -gx NVD_BACKEND direct
 
-# --- AMD GPU ---
-# Uncomment this line if you have an AMD GPU:
+# --- AMD GPU (modern: Radeon HD 7000+, GCN/RDNA architecture) ---
+# For older AMD (Radeon HD 2000-6000), use "r600" instead
 # set -gx LIBVA_DRIVER_NAME radeonsi
 
-# --- Intel GPU ---
-# Uncomment this line if you have an Intel GPU:
+# --- Intel GPU (modern: Broadwell 2014+, including Arc) ---
+# For older Intel (GMA 4500 through Coffee Lake), use "i965" instead
 # set -gx LIBVA_DRIVER_NAME iHD
 
 # ============================================================================

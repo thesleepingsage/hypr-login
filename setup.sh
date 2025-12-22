@@ -385,16 +385,13 @@ present_username() {
 }
 
 # Classify detected GPUs and display them
-# Sets: GPU_NVIDIA_FOUND, GPU_AMD_FOUND, GPU_INTEL_FOUND, GPU_TYPE_COUNT
-GPU_NVIDIA_FOUND=false
-GPU_AMD_FOUND=false
-GPU_INTEL_FOUND=false
+# Sets: GPU_TYPES_IN_ORDER (array of "value:Label" pairs in detection order), GPU_TYPE_COUNT
+GPU_TYPES_IN_ORDER=()
 GPU_TYPE_COUNT=0
 classify_detected_gpus() {
-    GPU_NVIDIA_FOUND=false
-    GPU_AMD_FOUND=false
-    GPU_INTEL_FOUND=false
+    GPU_TYPES_IN_ORDER=()
     GPU_TYPE_COUNT=0
+    local seen_nvidia=false seen_amd=false seen_intel=false
 
     for gpu in "${DETECTED_GPUS[@]}"; do
         local card="${gpu%%:*}"
@@ -402,16 +399,29 @@ classify_detected_gpus() {
         echo "    • $card: $driver"
 
         case "$driver" in
-            nvidia) GPU_NVIDIA_FOUND=true ;;
-            amdgpu) GPU_AMD_FOUND=true ;;
-            i915)   GPU_INTEL_FOUND=true ;;
+            nvidia)
+                if ! $seen_nvidia; then
+                    GPU_TYPES_IN_ORDER+=("nvidia:NVIDIA")
+                    seen_nvidia=true
+                    ((++GPU_TYPE_COUNT))
+                fi
+                ;;
+            amdgpu)
+                if ! $seen_amd; then
+                    GPU_TYPES_IN_ORDER+=("amd:AMD")
+                    seen_amd=true
+                    ((++GPU_TYPE_COUNT))
+                fi
+                ;;
+            i915)
+                if ! $seen_intel; then
+                    GPU_TYPES_IN_ORDER+=("intel:Intel")
+                    seen_intel=true
+                    ((++GPU_TYPE_COUNT))
+                fi
+                ;;
         esac
     done
-
-    # Count GPU types found (|| true prevents set -e exit when boolean is false)
-    $GPU_NVIDIA_FOUND && ((++GPU_TYPE_COUNT)) || true
-    $GPU_AMD_FOUND && ((++GPU_TYPE_COUNT)) || true
-    $GPU_INTEL_FOUND && ((++GPU_TYPE_COUNT)) || true
 }
 
 # Prompt user to select primary GPU when multiple types detected
@@ -420,9 +430,13 @@ select_primary_gpu() {
     echo "  Multiple GPU types detected. Which is your primary GPU?"
     echo ""
     local options=() i=1
-    $GPU_NVIDIA_FOUND && { options+=("nvidia"); echo "    $i) NVIDIA"; ((i++)); }
-    $GPU_AMD_FOUND && { options+=("amd"); echo "    $i) AMD"; ((i++)); }
-    $GPU_INTEL_FOUND && { options+=("intel"); echo "    $i) Intel"; ((i++)); }
+    for gpu_entry in "${GPU_TYPES_IN_ORDER[@]}"; do
+        local value="${gpu_entry%%:*}"
+        local label="${gpu_entry##*:}"
+        options+=("$value")
+        echo "    $i) $label"
+        ((i++))
+    done
     echo ""
     echo -n "  Choose [1-${#options[@]}]: "
     read -r gpu_choice
@@ -451,10 +465,8 @@ present_gpu_options() {
     if [[ $GPU_TYPE_COUNT -gt 1 ]]; then
         select_primary_gpu
     else
-        # Single GPU type - auto-select
-        $GPU_NVIDIA_FOUND && DETECTED_GPU_TYPE="nvidia"
-        $GPU_AMD_FOUND && DETECTED_GPU_TYPE="amd"
-        $GPU_INTEL_FOUND && DETECTED_GPU_TYPE="intel"
+        # Single GPU type - auto-select from the first (only) entry
+        DETECTED_GPU_TYPE="${GPU_TYPES_IN_ORDER[0]%%:*}"
     fi
 
     success "GPU type: $DETECTED_GPU_TYPE"
