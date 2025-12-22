@@ -45,24 +45,41 @@ function wait_for_resource
     return 0
 end
 
-# detect_drm_path: Find first available DRM device
+# detect_drm_path: Find DRM device, preferring discrete GPUs
+# Priority: HYPR_DRM_PATH > nvidia > amdgpu > first available
 function detect_drm_path
-    # Prefer user-specified path
+    # 1. User-specified path always wins
     if set -q HYPR_DRM_PATH
         echo $HYPR_DRM_PATH
         return 0
     end
 
-    # Auto-detect: find first card with a display output
-    for drm_file in /run/udev/data/+drm:card*-*
-        if test -e $drm_file
-            echo $drm_file
-            return 0
+    # 2. Find all cards and their drivers
+    # Prefer discrete GPUs (nvidia) over integrated (amdgpu on APUs)
+    for preferred_driver in nvidia amdgpu
+        for card_dir in /sys/class/drm/card*
+            set -l card_name (basename $card_dir)
+            # Only match base cards (card0, card1) not outputs (card0-DP-1)
+            if not string match -qr '^card[0-9]+$' $card_name
+                continue
+            end
+
+            # Check driver type
+            set -l driver_path (readlink -f $card_dir/device/driver 2>/dev/null)
+            if string match -q "*/$preferred_driver" $driver_path
+                # Found preferred GPU, get first display output
+                for drm_file in /run/udev/data/+drm:$card_name-*
+                    if test -e $drm_file
+                        echo $drm_file
+                        return 0
+                    end
+                end
+            end
         end
     end
 
-    # Fallback: any DRM card
-    for drm_file in /run/udev/data/+drm:card*
+    # 3. Fallback: first card with any display output
+    for drm_file in /run/udev/data/+drm:card*-*
         if test -e $drm_file
             echo $drm_file
             return 0
