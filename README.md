@@ -1,4 +1,4 @@
-# hypr-login
+<h1 align="center">hypr-login</h1>
 
 Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen and no display manager required.
 
