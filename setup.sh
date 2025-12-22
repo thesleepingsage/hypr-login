@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-# hypr-login-install.sh
+# setup.sh
 # Interactive installer for hypr-login (TTY autologin with hyprlock)
 #
 # Usage:
-#   ./hypr-login-install.sh           # Interactive install
-#   ./hypr-login-install.sh -n        # Dry-run (preview changes)
-#   ./hypr-login-install.sh -u        # Uninstall
-#   ./hypr-login-install.sh -d        # Update existing installation
-#   ./hypr-login-install.sh -h        # Show help
+#   ./setup.sh           # Interactive install
+#   ./setup.sh -n        # Dry-run (preview changes)
+#   ./setup.sh -u        # Uninstall
+#   ./setup.sh -d        # Update existing installation
+#   ./setup.sh -h        # Show help
 #
 # Config file (optional):
 #   ~/.config/hypr-login/install.conf
@@ -22,10 +22,10 @@ set -eu
 
 show_help() {
     cat << 'EOF'
-hypr-login-install.sh - Interactive installer for hypr-login
+setup.sh - Interactive installer for hypr-login
 
 USAGE:
-    ./hypr-login-install.sh [OPTIONS]
+    ./setup.sh [OPTIONS]
 
 OPTIONS:
     -h, --help       Show this help message
@@ -518,7 +518,7 @@ present_config_info() {
 show_detection_summary() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${BOLD}SYSTEM DETECTION SUMMARY${NC}"
+    echo -e "  ${BOLD}SYSTEM DETECTION SUMMARY${NC}"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
     echo "  Username:     $DETECTED_USERNAME"
@@ -607,13 +607,13 @@ install_fish_hook() {
 show_execs_instructions() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${BOLD}MANUAL STEP REQUIRED: Add hyprlock to your config${NC}"
+    echo -e "  ${BOLD}MANUAL STEP REQUIRED: Add hyprlock to your config${NC}"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
-    echo "  Add this line to the ${BOLD}TOP${NC} of your Hyprland execs config:"
+    echo -e "  Add this line to the ${BOLD}TOP${NC} of your Hyprland execs config:"
     echo "  (Must be the FIRST exec-once, with NO delay)"
     echo ""
-    echo "      ${GREEN}exec-once = hyprlock${NC}"
+    echo -e "      ${GREEN}exec-once = hyprlock${NC}"
     echo ""
 
     if [[ ${#DETECTED_EXECS_FILES[@]} -gt 0 ]]; then
@@ -623,7 +623,7 @@ show_execs_instructions() {
             echo "      • ~/$rel_path"
         done
         echo ""
-        echo "  Choose one that is ${BOLD}NOT${NC} overwritten by dotfile updates"
+        echo -e "  Choose one that is ${BOLD}NOT${NC} overwritten by dotfile updates"
         echo "  (usually in custom.d/ or similar)"
     fi
 
@@ -654,7 +654,7 @@ show_execs_instructions() {
 request_sudo() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${BOLD}SYSTEM-LEVEL CONFIGURATION${NC} (requires sudo)"
+    echo -e "  ${BOLD}SYSTEM-LEVEL CONFIGURATION${NC} (requires sudo)"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
     echo "  The following requires administrator privileges:"
@@ -703,7 +703,7 @@ EOF
 setup_tty2_testing() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${BOLD}STAGED TESTING${NC} (Mandatory before SDDM cutover)"
+    echo -e "  ${BOLD}STAGED TESTING${NC} (Mandatory before SDDM cutover)"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
     echo "  Before disabling SDDM, you MUST test on tty2 to verify"
@@ -728,17 +728,17 @@ setup_tty2_testing() {
 
 guide_tty2_test() {
     echo ""
-    echo "  ${BOLD}Test procedure:${NC}"
+    echo -e "  ${BOLD}Test procedure:${NC}"
     echo ""
-    echo "    1. Press ${CYAN}Ctrl+Alt+F2${NC} to switch to tty2"
+    echo -e "    1. Press ${CYAN}Ctrl+Alt+F2${NC} to switch to tty2"
     echo "    2. Login with your password"
     echo "    3. Verify Hyprland starts automatically"
     echo "    4. Verify hyprlock appears immediately"
     echo "    5. Unlock with your password"
     echo "    6. Verify desktop appears correctly"
-    echo "    7. Press ${CYAN}Ctrl+Alt+F1${NC} to return here"
+    echo -e "    7. Press ${CYAN}Ctrl+Alt+F1${NC} to return here"
     echo ""
-    echo "  ${YELLOW}If the test FAILS:${NC}"
+    echo -e "  ${YELLOW}If the test FAILS:${NC}"
     echo "    • Press Ctrl+C during the 10-second restart delay"
     echo "    • Check ~/.hyprland.log for errors"
     echo "    • Return here to troubleshoot"
@@ -808,7 +808,7 @@ confirm_test_passed() {
 confirm_sddm_disable() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${RED}${BOLD}⚠️  CRITICAL STEP: DISABLE SDDM${NC}"
+    echo -e "  ${RED}${BOLD}⚠️  CRITICAL STEP: DISABLE SDDM${NC}"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
     echo "  You are about to disable the SDDM display manager."
@@ -818,9 +818,9 @@ confirm_sddm_disable() {
     echo "    • Boot goes directly: TTY → Hyprland → hyprlock"
     echo "    • If something breaks, you need TTY or Live USB to recover"
     echo ""
-    echo "  ${YELLOW}Recovery commands (memorize these!):${NC}"
-    echo "    From tty3:   ${CYAN}sudo systemctl enable sddm && sudo reboot${NC}"
-    echo "    From USB:    ${CYAN}arch-chroot /mnt systemctl enable sddm${NC}"
+    echo -e "  ${YELLOW}Recovery commands (memorize these!):${NC}"
+    echo -e "    From tty3:   ${CYAN}sudo systemctl enable sddm && sudo reboot${NC}"
+    echo -e "    From USB:    ${CYAN}arch-chroot /mnt systemctl enable sddm${NC}"
     echo ""
 
     if ! ask_critical "Disable SDDM now?" "yes"; then
@@ -848,7 +848,7 @@ disable_sddm() {
 show_final_instructions() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${GREEN}${BOLD}✓ INSTALLATION COMPLETE${NC}"
+    echo -e "  ${GREEN}${BOLD}✓ INSTALLATION COMPLETE${NC}"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
     echo "  On next reboot:"
@@ -857,11 +857,11 @@ show_final_instructions() {
     echo "    3. hyprlock appears as login screen"
     echo "    4. Enter password to unlock → Desktop"
     echo ""
-    echo "  ${YELLOW}Recovery commands:${NC}"
-    echo "    Quick rollback: ${CYAN}sudo systemctl enable sddm && sudo reboot${NC}"
-    echo "    From Live USB:  ${CYAN}arch-chroot /mnt systemctl enable sddm${NC}"
+    echo -e "  ${YELLOW}Recovery commands:${NC}"
+    echo -e "    Quick rollback: ${CYAN}sudo systemctl enable sddm && sudo reboot${NC}"
+    echo -e "    From Live USB:  ${CYAN}arch-chroot /mnt systemctl enable sddm${NC}"
     echo ""
-    echo "  ${YELLOW}Files installed:${NC}"
+    echo -e "  ${YELLOW}Files installed:${NC}"
     echo "    • $LAUNCHER_DEST"
     echo "    • $FISH_HOOK_DEST"
     echo "    • $SYSTEMD_OVERRIDE_FILE"
@@ -881,7 +881,7 @@ show_final_instructions() {
 uninstall() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${BOLD}UNINSTALL hypr-login${NC}"
+    echo -e "  ${BOLD}UNINSTALL hypr-login${NC}"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
 
@@ -910,9 +910,9 @@ uninstall() {
     fi
 
     echo ""
-    echo "  ${YELLOW}Remaining manual steps:${NC}"
+    echo -e "  ${YELLOW}Remaining manual steps:${NC}"
     echo "    1. Remove 'exec-once = hyprlock' from your execs.conf"
-    echo "    2. Re-enable SDDM: ${CYAN}sudo systemctl enable sddm${NC}"
+    echo -e "    2. Re-enable SDDM: ${CYAN}sudo systemctl enable sddm${NC}"
     echo "    3. Reboot"
     echo ""
 
@@ -940,7 +940,7 @@ uninstall() {
 update() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${BOLD}UPDATE hypr-login${NC}"
+    echo -e "  ${BOLD}UPDATE hypr-login${NC}"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
 
@@ -990,11 +990,11 @@ update() {
 install() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
-    echo "  ${BOLD}hypr-login Installer${NC}"
+    echo -e "  ${BOLD}hypr-login Installer${NC}"
     echo "  Boot directly into Hyprland with hyprlock as login screen"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
-    echo "  ${YELLOW}⚠️  WARNING: This modifies your boot process!${NC}"
+    echo -e "  ${YELLOW}⚠️  WARNING: This modifies your boot process!${NC}"
     echo ""
     echo "  What this installer does:"
     echo "    • Configures TTY autologin (replaces SDDM)"
@@ -1007,7 +1007,7 @@ install() {
     echo ""
 
     if $DRY_RUN; then
-        echo "  ${CYAN}[DRY-RUN MODE]${NC} No files will be modified"
+        echo -e "  ${CYAN}[DRY-RUN MODE]${NC} No files will be modified"
         echo ""
     fi
 
