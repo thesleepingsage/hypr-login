@@ -27,6 +27,9 @@ systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
 - [Pitfalls & Solutions](#pitfalls--solutions)
 - [Shell Compatibility](#shell-compatibility)
 - [Hardware Notes](#hardware-notes)
+  - [NVIDIA GPU](#nvidia-gpu)
+  - [AMD GPU](#amd-gpu)
+  - [Hybrid GPU (NVIDIA + AMD iGPU)](#hybrid-gpu-nvidia--amd-igpu)
 - [Credential Manager Setup](#credential-manager-setup)
 - [Verification Commands](#verification-commands)
 - [Complete File Contents](#complete-file-contents)
@@ -176,19 +179,36 @@ function wait_for_resource
     return 0
 end
 
-# detect_drm_path: Find first available DRM device
+# detect_drm_path: Find DRM device, preferring discrete GPUs
+# Priority: HYPR_DRM_PATH > nvidia > amdgpu > first available
 function detect_drm_path
     if set -q HYPR_DRM_PATH
         echo $HYPR_DRM_PATH
         return 0
     end
-    for drm_file in /run/udev/data/+drm:card*-*
-        if test -e $drm_file
-            echo $drm_file
-            return 0
+
+    # Prefer discrete GPUs (nvidia) over integrated (amdgpu on APUs)
+    for preferred_driver in nvidia amdgpu
+        for card_dir in /sys/class/drm/card*
+            set -l card_name (basename $card_dir)
+            # Only match base cards (card0, card1) not outputs (card0-DP-1)
+            if not string match -qr '^card[0-9]+$' $card_name
+                continue
+            end
+            set -l driver_path (readlink -f $card_dir/device/driver 2>/dev/null)
+            if string match -q "*/$preferred_driver" $driver_path
+                for drm_file in /run/udev/data/+drm:$card_name-*
+                    if test -e $drm_file
+                        echo $drm_file
+                        return 0
+                    end
+                end
+            end
         end
     end
-    for drm_file in /run/udev/data/+drm:card*
+
+    # Fallback: first card with any display output
+    for drm_file in /run/udev/data/+drm:card*-*
         if test -e $drm_file
             echo $drm_file
             return 0
@@ -557,6 +577,29 @@ ls /run/udev/data/+drm:*
 # Environment variables (in launcher script)
 set -gx LIBVA_DRIVER_NAME radeonsi
 # AMD typically doesn't need the other NVIDIA-specific vars
+```
+
+### Hybrid GPU (NVIDIA + AMD iGPU)
+
+The launcher script **automatically prefers discrete GPUs** over integrated GPUs:
+
+1. **nvidia** driver is checked first (discrete NVIDIA cards)
+2. **amdgpu** driver is checked second (discrete AMD or integrated)
+3. Falls back to first available if neither found
+
+```fish
+# Check which GPU is which
+for card in /sys/class/drm/card*; test -d $card/device && echo (basename $card): (readlink $card/device/driver | xargs basename); end
+
+# Example output for NVIDIA 4090 + AMD Ryzen iGPU:
+# card0: amdgpu    <- Integrated (skipped)
+# card1: nvidia    <- Discrete (preferred!)
+```
+
+If auto-detection doesn't work for your setup, override with:
+
+```fish
+set -gx HYPR_DRM_PATH /run/udev/data/+drm:card1-DP-1
 ```
 
 ### Keychron Keyboards
