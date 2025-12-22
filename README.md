@@ -14,10 +14,13 @@ systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
 
 > **⚠️ Heads up**: This setup modifies your boot process. Make sure you understand each step and have a recovery plan (like a live USB) before proceeding. If something goes wrong, you'll need to fix it from another TTY or recovery environment.
 
+> **🔧 Customization Required**: The launcher script contains GPU and environment settings that **you must customize for your system**. The script has sensible defaults commented out - you'll need to uncomment the lines matching YOUR GPU (NVIDIA, AMD, or Intel) and optionally configure theme preferences. **Do not blindly copy the script without reading the comments!**
+
 ## Table of Contents
 
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
+- [Before You Begin: Customization Checklist](#before-you-begin-customization-checklist)
 - [Architecture](#architecture)
   - [Repository Structure](#repository-structure)
   - [Installation Paths](#installation-paths-where-files-end-up)
@@ -91,7 +94,38 @@ TTY Autologin Way:
 | hyprlock | Tested with 0.9.2+ |
 | Fish shell | Primary shell (bash/zsh possible with modifications) |
 | systemd | For getty and autologin |
-| NVIDIA or AMD GPU | GPU-specific DRM paths differ |
+| NVIDIA, AMD, or Intel GPU | GPU-specific DRM paths and env vars differ |
+
+---
+
+## Before You Begin: Customization Checklist
+
+Before copying any files, you'll need to customize the launcher script for your system. The script is organized into clearly labeled sections:
+
+### Required Customization
+
+| Section | What to Do |
+|---------|------------|
+| **GPU-Specific Variables** | Uncomment the lines matching YOUR GPU (NVIDIA, AMD, or Intel). Only ONE GPU section should be uncommented. |
+| **Username in autologin.conf** | Replace `YOUR_USERNAME` with your actual username. |
+
+### Optional Customization
+
+| Section | What to Do |
+|---------|------------|
+| **User Preferences** | Cursor theme, Qt theme, etc. are commented out by default. Only uncomment if you know the theme exists on your system. |
+| **Timeout Values** | `HYPR_TIMEOUT` defaults to 5 seconds. Increase if you have slow storage or GPU initialization. |
+
+### How to Check Your GPU Type
+
+```fish
+# Run this command to see your GPU driver:
+for card in /sys/class/drm/card*; test -d $card/device && echo (basename $card): (readlink $card/device/driver | xargs basename); end
+
+# Example output:
+# card0: amdgpu    <- AMD GPU
+# card1: nvidia    <- NVIDIA GPU
+```
 
 ---
 
@@ -258,24 +292,47 @@ if not wait_for_resource $XDG_RUNTIME_DIR "runtime directory" -d
 end
 
 # ──────────────────────────────────────────────────────────────────
-# GPU-specific environment variables (adjust for your GPU)
+# GPU-SPECIFIC ENVIRONMENT VARIABLES
 # ──────────────────────────────────────────────────────────────────
-# NVIDIA
-set -gx LIBVA_DRIVER_NAME nvidia
-set -gx __GLX_VENDOR_LIBRARY_NAME nvidia
-set -gx NVD_BACKEND direct
+# IMPORTANT: Uncomment ONLY the section matching YOUR GPU!
+# Using the wrong GPU settings will cause issues.
+#
+# To check your GPU:
+#   for card in /sys/class/drm/card*; test -d $card/device && echo (basename $card): (readlink $card/device/driver | xargs basename); end
+# ──────────────────────────────────────────────────────────────────
 
-# AMD (uncomment if using AMD, comment out NVIDIA vars above)
+# --- NVIDIA GPU ---
+# Uncomment these three lines if you have an NVIDIA GPU:
+# set -gx LIBVA_DRIVER_NAME nvidia
+# set -gx __GLX_VENDOR_LIBRARY_NAME nvidia
+# set -gx NVD_BACKEND direct
+
+# --- AMD GPU ---
+# Uncomment this line if you have an AMD GPU:
 # set -gx LIBVA_DRIVER_NAME radeonsi
 
+# --- Intel GPU ---
+# Uncomment this line if you have an Intel GPU:
+# set -gx LIBVA_DRIVER_NAME iHD
+
 # ──────────────────────────────────────────────────────────────────
-# Electron, cursor, Qt settings
+# SAFE DEFAULTS (Usually fine for everyone on Wayland)
 # ──────────────────────────────────────────────────────────────────
-set -gx ELECTRON_OZONE_PLATFORM_HINT wayland
-set -gx XCURSOR_THEME Bibata-Modern-Classic
-set -gx XCURSOR_SIZE 24
 set -gx QT_QPA_PLATFORM wayland
-set -gx QT_QPA_PLATFORMTHEME kde
+set -gx ELECTRON_OZONE_PLATFORM_HINT wayland  # or "auto" if you have issues
+
+# ──────────────────────────────────────────────────────────────────
+# USER PREFERENCES (OPTIONAL - Customize to match YOUR system)
+# ──────────────────────────────────────────────────────────────────
+# WARNING: These are examples only! Do not enable unless you know these
+# themes/settings exist on YOUR system. Leaving them commented uses system defaults.
+#
+# Cursor theme - check available themes: ls ~/.local/share/icons/ /usr/share/icons/
+# set -gx XCURSOR_THEME Bibata-Modern-Classic
+# set -gx XCURSOR_SIZE 24
+#
+# Qt theming - only if you have kde/qt5ct/qt6ct installed
+# set -gx QT_QPA_PLATFORMTHEME kde  # Options: kde, qt5ct, qt6ct
 
 # ──────────────────────────────────────────────────────────────────
 # Launch Hyprland
@@ -556,6 +613,8 @@ For more systemd-based approaches, see:
 
 ## Hardware Notes
 
+> **Note**: The launcher script has all GPU options commented out by default. Uncomment the section matching your GPU - don't just copy-paste from here.
+
 ### NVIDIA GPU
 
 ```fish
@@ -566,7 +625,7 @@ ls /run/udev/data/+drm:*
 # /run/udev/data/+drm:card0-DP-4
 # /run/udev/data/+drm:card1-DP-1  <- Your primary GPU's first display
 
-# Environment variables (in launcher script)
+# Uncomment these in your launcher script:
 set -gx LIBVA_DRIVER_NAME nvidia
 set -gx __GLX_VENDOR_LIBRARY_NAME nvidia
 set -gx NVD_BACKEND direct
@@ -578,9 +637,20 @@ set -gx NVD_BACKEND direct
 # Find your DRM card path
 ls /run/udev/data/+drm:*
 
-# Environment variables (in launcher script)
+# Uncomment this in your launcher script:
 set -gx LIBVA_DRIVER_NAME radeonsi
 # AMD typically doesn't need the other NVIDIA-specific vars
+```
+
+### Intel GPU
+
+```fish
+# Find your DRM card path
+ls /run/udev/data/+drm:*
+
+# Uncomment this in your launcher script:
+set -gx LIBVA_DRIVER_NAME iHD
+# Intel typically doesn't need other vars
 ```
 
 ### Hybrid GPU (NVIDIA + AMD iGPU)

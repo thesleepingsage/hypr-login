@@ -126,35 +126,46 @@ if not wait_for_resource $XDG_RUNTIME_DIR "runtime directory" -d
 end
 
 # ============================================================================
-# GPU-specific environment variables
-# Uncomment/modify based on your GPU
+# GPU-SPECIFIC ENVIRONMENT VARIABLES
+# ============================================================================
+# IMPORTANT: Uncomment ONLY the section matching YOUR GPU!
+# Using the wrong GPU settings will cause issues.
+#
+# To check your GPU: for card in /sys/class/drm/card*; test -d $card/device && echo (basename $card): (readlink $card/device/driver | xargs basename); end
 # ============================================================================
 
-# NVIDIA GPU
-set -gx LIBVA_DRIVER_NAME nvidia
-set -gx __GLX_VENDOR_LIBRARY_NAME nvidia
-set -gx NVD_BACKEND direct
+# --- NVIDIA GPU ---
+# Uncomment these three lines if you have an NVIDIA GPU:
+# set -gx LIBVA_DRIVER_NAME nvidia
+# set -gx __GLX_VENDOR_LIBRARY_NAME nvidia
+# set -gx NVD_BACKEND direct
 
-# AMD GPU (uncomment if using AMD, comment out NVIDIA vars above)
+# --- AMD GPU ---
+# Uncomment this line if you have an AMD GPU:
 # set -gx LIBVA_DRIVER_NAME radeonsi
 
-# ============================================================================
-# Optional: Cursor theme (update to your preferred theme)
-# ============================================================================
-set -gx XCURSOR_THEME Bibata-Modern-Classic
-set -gx XCURSOR_SIZE 24
+# --- Intel GPU ---
+# Uncomment this line if you have an Intel GPU:
+# set -gx LIBVA_DRIVER_NAME iHD
 
 # ============================================================================
-# Qt/Wayland settings
+# SAFE DEFAULTS (Usually fine for everyone on Wayland)
 # ============================================================================
 set -gx QT_QPA_PLATFORM wayland
-set -gx QT_QPA_PLATFORMTHEME kde  # or qt5ct, qt6ct, etc.
+set -gx ELECTRON_OZONE_PLATFORM_HINT wayland  # or "auto" if you have issues
 
 # ============================================================================
-# Electron apps (Discord, VSCode, Slack, etc.)
-# SDDM often sets this implicitly - needed for native Wayland
+# USER PREFERENCES (OPTIONAL - Customize to match YOUR system)
 # ============================================================================
-set -gx ELECTRON_OZONE_PLATFORM_HINT wayland  # or "auto"
+# WARNING: These are examples only! Do not enable unless you know these
+# themes/settings exist on YOUR system. Leaving them commented uses system defaults.
+#
+# Cursor theme - check available themes: ls ~/.local/share/icons/ /usr/share/icons/
+# set -gx XCURSOR_THEME Bibata-Modern-Classic
+# set -gx XCURSOR_SIZE 24
+#
+# Qt theming - only if you have kde/qt5ct/qt6ct installed
+# set -gx QT_QPA_PLATFORMTHEME kde  # Options: kde, qt5ct, qt6ct
 
 # Launch Hyprland - capture output for debugging
 echo "Starting Hyprland..."
