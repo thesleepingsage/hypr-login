@@ -2,7 +2,7 @@
 
 Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen and no display manager required.
 
-[![Watch the video](https://img.youtube.com/vi/<A6Ydol_6ogU>/hqdefault.jpg)](https://www.youtube.com/embed/<VIDEO_ID>)
+[![Watch the video](https://img.youtube.com/vi/<A6Ydol_6ogU>/hqdefault.jpg)](https://www.youtube.com/embed/<A6Ydol_6ogU>)
 
 [<img src="https://img.youtube.com/vi/<A6Ydol_6ogU>/hqdefault.jpg" width="600" height="300"
 />](https://www.youtube.com/embed/A6Ydol_6ogU)
