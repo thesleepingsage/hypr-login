@@ -1,6 +1,6 @@
 # hypr-login
 
-Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen—no display manager required.
+Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen and no display manager required.
 
 This guide walks you through replacing SDDM (or any display manager) with a simpler boot chain:
 
