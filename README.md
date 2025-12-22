@@ -1,8 +1,14 @@
-# SDDM Bypass: TTY Autologin + Hyprlock as Pseudo-Login
+# hypr-login
 
-A battle-tested guide for replacing SDDM with direct TTY autologin → Hyprland → hyprlock.
+Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen—no display manager required.
 
-> **⚠️ Disclaimer**: This guide is provided as-is. By following these steps, you accept full responsibility for any outcomes. If something breaks, you get to keep both pieces. This setup modifies critical boot components - ensure you understand what you're doing and have recovery options available. The author is not responsible for bricked systems, lost data, existential crises, or any other issues arising from following this guide.
+This guide walks you through replacing SDDM (or any display manager) with a simpler boot chain:
+
+```
+systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
+```
+
+> **⚠️ Heads up**: This setup modifies your boot process. Make sure you understand each step and have a recovery plan (like a live USB) before proceeding. If something goes wrong, you'll need to fix it from another TTY or recovery environment.
 
 ## Table of Contents
 
