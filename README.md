@@ -137,88 +137,119 @@ This repo provides ready-to-use files that you copy to your system:
 
 ### Phase 1: Create Launcher Script
 
-Create `~/.config/hypr/scripts/hyprland-tty.fish`:
+Copy `scripts/fish/hyprland-tty.fish` to `~/.config/hypr/scripts/hyprland-tty.fish`:
 
 ```fish
 #!/usr/bin/fish
 
 # Hyprland TTY Launcher Script
 # Launches Hyprland directly from TTY login with proper environment setup
+#
+# Configuration (via environment variables):
+#   HYPR_DRM_PATH - Path to wait for (auto-detected if not set)
+#   HYPR_TIMEOUT  - Max wait time in seconds (default: 5)
 
-# Verbose startup for debugging
-set TTY (tty)
+set -q HYPR_TIMEOUT; or set HYPR_TIMEOUT 5
+
+# ──────────────────────────────────────────────────────────────────
+# Helper Functions
+# ──────────────────────────────────────────────────────────────────
+
+# wait_for_resource: Wait for a path to exist with timeout
+function wait_for_resource
+    set -l path $argv[1]
+    set -l name $argv[2]
+    set -l test_type $argv[3]; or set test_type -e
+    set -l max_iterations (math "$HYPR_TIMEOUT * 5")
+    set -l count 0
+
+    while not test $test_type $path
+        if test $count -ge $max_iterations
+            echo "ERROR: $name ($path) not available after $HYPR_TIMEOUT seconds"
+            return 1
+        end
+        echo "Waiting for $name..."
+        sleep 0.2
+        set count (math $count + 1)
+    end
+    echo "$name ready: $path"
+    return 0
+end
+
+# detect_drm_path: Find first available DRM device
+function detect_drm_path
+    if set -q HYPR_DRM_PATH
+        echo $HYPR_DRM_PATH
+        return 0
+    end
+    for drm_file in /run/udev/data/+drm:card*-*
+        if test -e $drm_file
+            echo $drm_file
+            return 0
+        end
+    end
+    for drm_file in /run/udev/data/+drm:card*
+        if test -e $drm_file
+            echo $drm_file
+            return 0
+        end
+    end
+    return 1
+end
+
+# ──────────────────────────────────────────────────────────────────
+# Main Script
+# ──────────────────────────────────────────────────────────────────
+
 echo "=== Hyprland TTY Launcher ==="
-echo "TTY: $TTY"
+echo "TTY: "(tty)
 echo "User: "(whoami)" (UID: "(id -u)")"
 
-# ──────────────────────────────────────────────────────────────────
-# CRITICAL: Wait for DRM to be ready
-# ──────────────────────────────────────────────────────────────────
-# Find your GPU's DRM path with: ls /run/udev/data/+drm:*
-# NVIDIA example: card1-DP-1
-# AMD example: card0-DP-1 (varies by setup)
-while not test -e /run/udev/data/+drm:card1-DP-1
-    echo "Waiting for DRM..."
-    sleep 0.2
+# Wait for DRM (GPU ready)
+set DRM_PATH (detect_drm_path)
+if test -z "$DRM_PATH"
+    echo "ERROR: No DRM device found. Check GPU drivers."
+    echo "Hint: Run 'ls /run/udev/data/+drm:*' to see available devices"
+    echo "      Set HYPR_DRM_PATH to specify manually"
+    echo "Press Enter to exit..."
+    read
+    exit 1
 end
 
-# ──────────────────────────────────────────────────────────────────
-# Essential XDG environment variables
-# ──────────────────────────────────────────────────────────────────
-# Note: XDG_SESSION_TYPE and XDG_CURRENT_DESKTOP are set by Hyprland internally
+if not wait_for_resource $DRM_PATH "DRM device" -e
+    echo "Press Enter to exit..."
+    read
+    exit 1
+end
+
+# Wait for XDG_RUNTIME_DIR
 set -gx XDG_SESSION_CLASS user
+set -gx XDG_RUNTIME_DIR /run/user/(id -u)
 
-# ──────────────────────────────────────────────────────────────────
-# CRITICAL: Wait for XDG_RUNTIME_DIR
-# ──────────────────────────────────────────────────────────────────
-# pam_systemd creates this, but there's a race condition.
-# The script may run before systemd-logind creates the directory.
-set -l uid (id -u)
-set -gx XDG_RUNTIME_DIR /run/user/$uid
-
-set -l wait_count 0
-while not test -d $XDG_RUNTIME_DIR
-    if test $wait_count -ge 25
-        echo "ERROR: XDG_RUNTIME_DIR ($XDG_RUNTIME_DIR) not created after 5 seconds"
-        echo "Check if pam_systemd is configured correctly"
-        echo "Press Enter to exit..."
-        read
-        exit 1
-    end
-    echo "Waiting for runtime directory..."
-    sleep 0.2
-    set wait_count (math $wait_count + 1)
+if not wait_for_resource $XDG_RUNTIME_DIR "runtime directory" -d
+    echo "Check if pam_systemd is configured correctly"
+    echo "Press Enter to exit..."
+    read
+    exit 1
 end
-echo "Runtime directory ready: $XDG_RUNTIME_DIR"
 
 # ──────────────────────────────────────────────────────────────────
-# GPU-specific environment variables
+# GPU-specific environment variables (adjust for your GPU)
 # ──────────────────────────────────────────────────────────────────
-# NVIDIA (adjust for your GPU)
+# NVIDIA
 set -gx LIBVA_DRIVER_NAME nvidia
 set -gx __GLX_VENDOR_LIBRARY_NAME nvidia
 set -gx NVD_BACKEND direct
 
-# AMD users: You likely don't need the NVIDIA vars above.
-# Instead, you might need:
+# AMD (uncomment if using AMD, comment out NVIDIA vars above)
 # set -gx LIBVA_DRIVER_NAME radeonsi
 
 # ──────────────────────────────────────────────────────────────────
-# Electron/Chromium apps (Discord, VSCode, Slack, etc.)
+# Electron, cursor, Qt settings
 # ──────────────────────────────────────────────────────────────────
-# SDDM often sets this implicitly. Without it, Electron apps may
-# crash or fall back to XWayland.
 set -gx ELECTRON_OZONE_PLATFORM_HINT wayland
-
-# ──────────────────────────────────────────────────────────────────
-# Cursor theme
-# ──────────────────────────────────────────────────────────────────
 set -gx XCURSOR_THEME Bibata-Modern-Classic
 set -gx XCURSOR_SIZE 24
-
-# ──────────────────────────────────────────────────────────────────
-# Qt/Wayland settings
-# ──────────────────────────────────────────────────────────────────
 set -gx QT_QPA_PLATFORM wayland
 set -gx QT_QPA_PLATFORMTHEME kde
 
@@ -650,73 +681,7 @@ cat /sys/class/tty/tty0/active
 
 ### hyprland-tty.fish
 
-```fish
-#!/usr/bin/fish
-
-# Hyprland TTY Launcher Script
-# Launches Hyprland directly from TTY login with proper environment setup
-
-# Verbose startup for debugging
-set TTY (tty)
-echo "=== Hyprland TTY Launcher ==="
-echo "TTY: $TTY"
-echo "User: "(whoami)" (UID: "(id -u)")"
-
-# Wait for DRM to be ready (card1 = NVIDIA GPU)
-# Find your path with: ls /run/udev/data/+drm:*
-while not test -e /run/udev/data/+drm:card1-DP-1
-    echo "Waiting for DRM..."
-    sleep 0.2
-end
-
-# Essential environment variables
-# Note: XDG_SESSION_TYPE and XDG_CURRENT_DESKTOP are set by Hyprland internally
-set -gx XDG_SESSION_CLASS user
-
-# Ensure XDG_RUNTIME_DIR exists (pam_systemd should create it, but wait to be sure)
-set -l uid (id -u)
-set -gx XDG_RUNTIME_DIR /run/user/$uid
-
-# Wait for runtime dir to be created by systemd-logind (up to 5 seconds)
-set -l wait_count 0
-while not test -d $XDG_RUNTIME_DIR
-    if test $wait_count -ge 25
-        echo "ERROR: XDG_RUNTIME_DIR ($XDG_RUNTIME_DIR) not created after 5 seconds"
-        echo "Check if pam_systemd is configured correctly"
-        echo "Press Enter to exit..."
-        read
-        exit 1
-    end
-    echo "Waiting for runtime directory..."
-    sleep 0.2
-    set wait_count (math $wait_count + 1)
-end
-echo "Runtime directory ready: $XDG_RUNTIME_DIR"
-
-# NVIDIA-specific
-set -gx LIBVA_DRIVER_NAME nvidia
-set -gx __GLX_VENDOR_LIBRARY_NAME nvidia
-set -gx NVD_BACKEND direct
-
-# Electron/Chromium apps (SDDM often sets this implicitly)
-set -gx ELECTRON_OZONE_PLATFORM_HINT wayland
-
-# Cursor
-set -gx XCURSOR_THEME Bibata-Modern-Classic
-set -gx XCURSOR_SIZE 24
-
-# Qt/Wayland
-set -gx QT_QPA_PLATFORM wayland
-set -gx QT_QPA_PLATFORMTHEME kde
-
-# Launch Hyprland - capture output for debugging
-echo "Starting Hyprland..."
-Hyprland 2>&1 | tee ~/.hyprland.log
-set -l exit_code $pipestatus[1]
-echo "Hyprland exited with code: $exit_code"
-echo "Press Enter to continue..."
-read
-```
+See the full script in `scripts/fish/hyprland-tty.fish` or the [Phase 1](#phase-1-create-launcher-script) section above.
 
 ### hyprland-autostart.fish
 
