@@ -1,0 +1,30 @@
+# Systemd service for Hyprland (ALTERNATIVE APPROACH)
+#
+# ⚠️  UNTESTED - This was contributed by the community but has not been
+#     personally tested. Use at your own risk!
+#
+# This is an alternative to the fish script approach. It lets systemd
+# handle dependencies (no manual DRM/XDG_RUNTIME_DIR waits).
+#
+# Installation:
+#   sudo cp hyprland.service /etc/systemd/system/
+#   sudo systemctl enable hyprland.service
+#
+# Note: You still need `exec-once = hyprlock` in your Hyprland config.
+
+[Unit]
+Description=Hyprland
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+ExecStart=/usr/bin/env bash -c '[[ "$XDG_VTNR" -eq 1 ]] && exec dbus-run-session /usr/share/wayland-sessions/hyprland.desktop || systemctl isolate multi-user.target'
+Restart=no
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+KillMode=process
+
+[Install]
+WantedBy=graphical.target
