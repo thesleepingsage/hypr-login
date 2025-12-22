@@ -108,7 +108,7 @@ if test -z "$DRM_PATH"
     exit 1
 end
 
-if not wait_for_resource $DRM_PATH "DRM device" -e
+if not wait_for_resource "$DRM_PATH" "DRM device" -e
     echo "Press Enter to exit..."
     read
     exit 1
@@ -118,7 +118,7 @@ end
 set -gx XDG_SESSION_CLASS user
 set -gx XDG_RUNTIME_DIR /run/user/(id -u)
 
-if not wait_for_resource $XDG_RUNTIME_DIR "runtime directory" -d
+if not wait_for_resource "$XDG_RUNTIME_DIR" "runtime directory" -d
     echo "Check if pam_systemd is configured correctly"
     echo "Press Enter to exit..."
     read
