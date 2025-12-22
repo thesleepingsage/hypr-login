@@ -94,7 +94,7 @@ TTY Autologin Way:
 |------|---------|
 | `~/.config/hypr/scripts/hyprland-tty.fish` | Main launcher with env setup, DRM wait, runtime dir wait |
 | `~/.config/fish/conf.d/hyprland-autostart.fish` | Fish login hook that triggers the launcher |
-| `~/.config/hypr/custom.d/regular/execs.conf` | Contains `exec-once = hyprlock` at the top |
+| `~/.config/hypr/custom.d/regular/execs.conf` (or wherever your custom execs are stored) | Contains `exec-once = hyprlock` at the top |
 | `/etc/systemd/system/getty@tty1.service.d/autologin.conf` | Systemd override for autologin |
 
 ### Boot Sequence Diagram
