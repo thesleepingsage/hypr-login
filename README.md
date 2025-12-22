@@ -2,6 +2,12 @@
 
 Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen and no display manager required.
 
+[![Watch the video](https://img.youtube.com/vi/<A6Ydol_6ogU>/hqdefault.jpg)](https://www.youtube.com/embed/<VIDEO_ID>)
+
+[<img src="https://img.youtube.com/vi/<A6Ydol_6ogU>/hqdefault.jpg" width="600" height="300"
+/>](https://www.youtube.com/embed/A6Ydol_6ogU)
+
+
 This guide walks you through replacing SDDM (or any display manager) with a simpler boot chain:
 
 ```
