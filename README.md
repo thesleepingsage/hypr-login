@@ -304,7 +304,7 @@ sudo systemctl start getty@tty2
 **Known limitation**: You can't run two Hyprland instances simultaneously (GPU contention). If Hyprland is already running on tty1 via SDDM, the tty2 test will fail with a "crash". This is expected.
 
 **Test VT switching** before proceeding:
-- Native Ctrl+Alt+F1-F7 should work
+- Native Ctrl+Alt+F1-F6 should work
 - If not working, see [VT Switching Issues](#vt-switching-issues)
 
 ### Phase 5: Production Cutover
@@ -392,7 +392,7 @@ sudo reboot
 | Symptom | Cause | Solution |
 |---------|-------|----------|
 | Ctrl+Alt+F* does nothing | Keyboard F-keys in media mode | Toggle Fn-lock (Keychron: Fn+X+L for ~3 seconds) |
-| Ctrl+Alt+F* does nothing | Keys sending media codes | Verify with `wev` that F1-F7 send keycodes 65470+ |
+| Ctrl+Alt+F* does nothing | Keys sending media codes | Verify with `wev` that F1-F6 send keycodes 65470+ |
 | Switching works outbound but crashes inbound | Hyprland bug #4839 with custom monitor resolutions | May improve after SDDM bypass; fallback: `sudo chvt N` keybinds |
 | Need workaround binds | Native switching unreliable | Add to binds.conf (requires sudoers rule for `chvt`): |
 
