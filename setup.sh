@@ -384,6 +384,14 @@ present_username() {
     success "Username confirmed: $DETECTED_USERNAME"
 }
 
+# Driver name → "value:Label" mapping for GPU detection
+# Add new GPU vendors here (driver name from /sys/class/drm/cardN/device/driver)
+declare -A GPU_DRIVER_MAP=(
+    [nvidia]="nvidia:NVIDIA"
+    [amdgpu]="amd:AMD"
+    [i915]="intel:Intel"
+)
+
 # Classify detected GPUs and display them
 # Sets: GPU_TYPES_IN_ORDER (array of "value:Label" pairs in detection order), GPU_TYPE_COUNT
 GPU_TYPES_IN_ORDER=()
@@ -391,36 +399,19 @@ GPU_TYPE_COUNT=0
 classify_detected_gpus() {
     GPU_TYPES_IN_ORDER=()
     GPU_TYPE_COUNT=0
-    local seen_nvidia=false seen_amd=false seen_intel=false
+    local -A seen=()
 
     for gpu in "${DETECTED_GPUS[@]}"; do
         local card="${gpu%%:*}"
         local driver="${gpu##*:}"
         echo "    • $card: $driver"
 
-        case "$driver" in
-            nvidia)
-                if ! $seen_nvidia; then
-                    GPU_TYPES_IN_ORDER+=("nvidia:NVIDIA")
-                    seen_nvidia=true
-                    ((++GPU_TYPE_COUNT))
-                fi
-                ;;
-            amdgpu)
-                if ! $seen_amd; then
-                    GPU_TYPES_IN_ORDER+=("amd:AMD")
-                    seen_amd=true
-                    ((++GPU_TYPE_COUNT))
-                fi
-                ;;
-            i915)
-                if ! $seen_intel; then
-                    GPU_TYPES_IN_ORDER+=("intel:Intel")
-                    seen_intel=true
-                    ((++GPU_TYPE_COUNT))
-                fi
-                ;;
-        esac
+        # Add to list if known driver and not yet seen
+        if [[ -v "GPU_DRIVER_MAP[$driver]" ]] && [[ ! -v "seen[$driver]" ]]; then
+            GPU_TYPES_IN_ORDER+=("${GPU_DRIVER_MAP[$driver]}")
+            seen[$driver]=1
+            ((++GPU_TYPE_COUNT))
+        fi
     done
 }
 
@@ -1097,6 +1088,8 @@ install() {
 # SECTION 18: Argument Parsing
 # ============================================================================
 
+SOURCE_ONLY=false
+
 for arg in "$@"; do
     case "$arg" in
         -h|--help)      show_help ;;
@@ -1104,6 +1097,7 @@ for arg in "$@"; do
         -u|--uninstall) UNINSTALL=true ;;
         -d|--update)    UPDATE_MODE=true ;;
         --skip-test)    SKIP_TEST=true ;;
+        --source-only)  SOURCE_ONLY=true ;;  # For testing: load functions without running
         *)
             error "Unknown option: $arg"
             echo "Use --help for usage information"
@@ -1115,6 +1109,9 @@ done
 # ============================================================================
 # SECTION 19: Entry Point
 # ============================================================================
+
+# Skip execution when sourced for testing
+$SOURCE_ONLY && return 0 2>/dev/null || $SOURCE_ONLY && exit 0
 
 if $UNINSTALL; then
     uninstall
