@@ -270,7 +270,7 @@ if test -z "$DRM_PATH"
     exit 1
 end
 
-if not wait_for_resource $DRM_PATH "DRM device" -e
+if not wait_for_resource "$DRM_PATH" "DRM device" -e
     echo "Press Enter to exit..."
     read
     exit 1
@@ -280,7 +280,7 @@ end
 set -gx XDG_SESSION_CLASS user
 set -gx XDG_RUNTIME_DIR /run/user/(id -u)
 
-if not wait_for_resource $XDG_RUNTIME_DIR "runtime directory" -d
+if not wait_for_resource "$XDG_RUNTIME_DIR" "runtime directory" -d
     echo "Check if pam_systemd is configured correctly"
     echo "Press Enter to exit..."
     read
@@ -353,7 +353,7 @@ Create `~/.config/fish/conf.d/hyprland-autostart.fish`:
 
 ```fish
 # Hyprland TTY Autostart
-# Auto-launches Hyprland on tty1/tty2 login, exits on failure for security
+# Auto-launches Hyprland on tty1/tty2 login, handles crashes gracefully
 
 # Only on login shell, on tty1 or tty2
 if status is-login
@@ -800,7 +800,7 @@ See the full script in `scripts/fish/hyprland-tty.fish` or the [Phase 1](#phase-
 
 ```fish
 # Hyprland TTY Autostart
-# Auto-launches Hyprland on tty1/tty2 login, exits on failure for security
+# Auto-launches Hyprland on tty1/tty2 login, handles crashes gracefully
 
 # Only on login shell, on tty1 or tty2
 if status is-login
