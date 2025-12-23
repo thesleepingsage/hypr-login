@@ -150,6 +150,13 @@ This repo provides ready-to-use files that you copy to your system:
 
 ### Boot Sequence Diagram
 
+**Quick timeline** (~3 seconds total):
+```
+Boot → getty autologin → Fish → DRM wait → Hyprland → hyprlock → Desktop
+       (0s)              (1s)   (1-2s)     (2-3s)     (3s)       (unlock)
+```
+
+**Detailed flow**:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  systemd                                                        │
@@ -415,7 +422,9 @@ background {
 
 ### Phase 4: Staged Testing
 
-Before disabling SDDM, test on tty2 while SDDM still works as fallback:
+Before disabling SDDM, test on tty2 while SDDM still works as fallback.
+
+> **⚠️ Expect a "crash" if Hyprland is already running**: You can't run two Hyprland instances simultaneously (GPU contention). If SDDM launched Hyprland on tty1, the tty2 test will fail - that's expected! You're testing that the *script runs correctly*, not running a second session. Watch for the "Starting Hyprland..." message to confirm the script worked.
 
 ```bash
 # Start getty on tty2 for testing
@@ -426,14 +435,24 @@ sudo systemctl start getty@tty2
 
 # Login with your password
 # Fish should auto-run the launcher
-# Hyprland should start → hyprlock should lock
+# You should see "Starting Hyprland..." (script working!)
+# Then it will "crash" due to GPU contention (expected)
 ```
-
-**Known limitation**: You can't run two Hyprland instances simultaneously (GPU contention). If Hyprland is already running on tty1 via SDDM, the tty2 test will fail with a "crash". This is expected.
 
 **Test VT switching** before proceeding:
 - Native Ctrl+Alt+F1-F6 should work
 - If not working, see [VT Switching Issues](#vt-switching-issues)
+
+**If something goes wrong**, enable Hyprland logging for troubleshooting:
+
+```ini
+# In your hyprland.conf debug section:
+debug {
+    disable_logs = false  # Default is true - enable this to collect logs
+}
+```
+
+Logs will appear in `~/.hyprland.log` (our launcher script also tees output there).
 
 ### Phase 5: Live Cutover
 
@@ -441,10 +460,10 @@ sudo systemctl start getty@tty2
 # Step 1: Create autologin systemd override
 sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
 
-# Replace 'dj' with your username
+# Replace 'YOUR_USERNAME' with your username
 echo '[Service]
 ExecStart=
-ExecStart=-/usr/bin/agetty -o "-p -f -- \\u" --noclear --autologin dj %I $TERM' | sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf
+ExecStart=-/usr/bin/agetty -o "-p -f -- \\u" --noclear --autologin YOUR_USERNAME %I $TERM' | sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf
 
 # Step 2: Disable SDDM (keep installed for easy rollback)
 sudo systemctl disable sddm
@@ -466,10 +485,15 @@ If Hyprland fails but you can still switch TTYs:
 # Press Ctrl+Alt+F3 to switch to tty3
 # Login with your credentials
 
-# Re-enable SDDM
+# Re-enable SDDM and start it immediately
 sudo systemctl enable sddm
-sudo reboot
+sudo systemctl start sddm
+
+# If start doesn't work, reboot:
+# sudo reboot
 ```
+
+The `start` command should launch SDDM immediately without needing a reboot. If that doesn't work for some reason, reboot as a fallback.
 
 ### From Recovery/Live USB
 
@@ -497,7 +521,7 @@ reboot
 ```bash
 sudo systemctl disable getty@tty1
 sudo systemctl enable sddm
-sudo reboot
+sudo systemctl start sddm  # Starts SDDM immediately (reboot if this doesn't work)
 ```
 
 ---
@@ -517,27 +541,47 @@ sudo reboot
 
 ### VT Switching Issues
 
+**First, ensure F-keys send proper keycodes** by adding to your Hyprland `input` section:
+
+```ini
+input {
+    kb_options = fkeys:basic_13-24
+}
+```
+
+Without this, F-keys may send weird/media key inputs instead of standard function key codes.
+
 | Symptom | Cause | Solution |
 |---------|-------|----------|
 | Ctrl+Alt+F* does nothing | Keyboard F-keys in media mode | Toggle Fn-lock (Keychron: Fn+X+L for ~3 seconds) |
-| Ctrl+Alt+F* does nothing | Keys sending media codes | Verify with `wev` that F1-F6 send keycodes 65470+ |
-| Switching works outbound but crashes inbound | Hyprland bug #4839 with custom monitor resolutions | May improve after SDDM bypass; fallback: `sudo chvt N` keybinds |
-| Need workaround binds | Native switching unreliable | Add to binds.conf (requires sudoers rule for `chvt`): |
+| Ctrl+Alt+F* does nothing | Keys sending weird codes | Add `kb_options = fkeys:basic_13-24` to input config (see above) |
+| Switching works outbound but crashes inbound | Hyprland bug #4839 with custom monitor resolutions | May improve after SDDM bypass; use workaround binds below |
+| Native switching unreliable | Various compositor/driver issues | Use workaround binds below |
+
+**Workaround keybinds** (if native Ctrl+Alt+F* doesn't work):
+
+```bash
+# First, allow passwordless chvt:
+echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/chvt" | sudo tee /etc/sudoers.d/chvt
+```
 
 ```ini
-# Workaround VT switching binds (if native doesn't work)
-# Requires: echo "user ALL=(ALL) NOPASSWD: /usr/bin/chvt" | sudo tee /etc/sudoers.d/chvt
+# Then add to your Hyprland binds.conf:
 bind = CTRL ALT, F1, exec, sudo chvt 1
 bind = CTRL ALT, F2, exec, sudo chvt 2
 bind = CTRL ALT, F3, exec, sudo chvt 3
-# ... etc
+bind = CTRL ALT, F4, exec, sudo chvt 4
+bind = CTRL ALT, F5, exec, sudo chvt 5
+bind = CTRL ALT, F6, exec, sudo chvt 6
 ```
 
 ---
 
 ## Shell Compatibility
 
-**This guide uses Fish shell.** Other shells require modifications:
+**This guide uses Fish shell.** Other shells require modifications.
+
+> **Contributions welcome!** See `contrib/bash/` and `contrib/zsh/` for placeholder directories awaiting community-contributed ports.
 
 | Fish | Bash Equivalent | Zsh Equivalent |
 |------|-----------------|----------------|
@@ -724,11 +768,12 @@ kwalletmanager5
 
 Keep kwallet password, accept one prompt per session after unlocking hyprlock.
 
-#### Option 3: Custom hyprlock PAM (Experimental)
+#### Option 3: Custom hyprlock PAM (Experimental - Probably Doesn't Work)
 
-Attempt to unlock kwallet during hyprlock auth (may not work - hyprlock doesn't call session phase):
+In theory, you could unlock kwallet during hyprlock auth. In practice, I don't believe this works because hyprlock doesn't call the PAM session phase. But perhaps someone more clever with PAM could figure it out and let us know!
 
 ```bash
+# Theoretical approach (untested/likely broken):
 echo '#%PAM-1.0
 # hyprlock with kwallet unlock attempt
 auth        include     system-auth
@@ -737,6 +782,8 @@ account     include     system-auth
 -session    optional    pam_kwallet5.so auto_start force_run
 session     optional    pam_permit.so' | sudo tee /etc/pam.d/hyprlock
 ```
+
+If you get this working, please open an issue or PR!
 
 ### gnome-keyring Conflicts
 
@@ -866,8 +913,8 @@ After this setup, you have two distinct actions:
 
 | Action | Default Keybind | Behavior |
 |--------|----------------|----------|
-| **Lock** | `$mainMod + L` | hyprlock overlay, session continues, apps keep running |
-| **Logout** | `$mainMod + M` | Full Hyprland exit → auto-restart → hyprlock as auth gate, fresh session |
+| **Lock** | `$mainMod + L, hyprlock` | hyprlock overlay, session continues, apps keep running |
+| **Logout** | `$mainMod + M, exit` | Full Hyprland exit → Run `hyprland` → hyprlock as auth gate, fresh session |
 
 The logout action gives you a fresh session with all `exec-once` commands re-run.
 
@@ -883,11 +930,14 @@ The logout action gives you a fresh session with all `exec-once` commands re-run
 ## Sources
 
 - [Hyprland Wiki: Systemd Start](https://wiki.hypr.land/Useful-Utilities/Systemd-start/)
+- [Hyprland Discord](https://discord.gg/hQ9XvMUjjr) - Community support and discussion
+- [Arch Wiki: Getty](https://wiki.archlinux.org/title/Getty) - Autologin configuration reference
 - [Reddit: Starting Hyprland directly from systemd](https://www.reddit.com/r/hyprland/comments/127m3ef/starting_hyprland_directy_from_systemd_a_guide_to/)
 - [Hyprland Issue #4839: VT switching fixes](https://github.com/hyprwm/Hyprland/issues/4839)
 - [Hyprland Issue #4850: VT switching freezes](https://github.com/hyprwm/Hyprland/issues/4850)
 
 ---
 
-*Last updated: 2025-12-21*
+*Last updated: 2025-12-23*
 *Tested on: Arch Linux, Hyprland 0.52.2, Fish 3.x, NVIDIA GPU*
+*AMD/Intel GPUs: Untested - feedback welcome!*
