@@ -115,7 +115,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # ============================================================================
-# SECTION 3b: Interrupt Handling
+# SECTION 4: Interrupt Handling
 # ============================================================================
 
 # Track if we're in the middle of a critical operation
@@ -144,7 +144,7 @@ cleanup_on_interrupt() {
 trap cleanup_on_interrupt INT TERM
 
 # ============================================================================
-# SECTION 3c: Concurrent Execution Lock
+# SECTION 5: Concurrent Execution Lock
 # ============================================================================
 
 # Prevent multiple instances from running simultaneously
@@ -161,7 +161,7 @@ acquire_lock
 trap 'flock -u 200 2>/dev/null; cleanup_on_interrupt' INT TERM
 
 # ============================================================================
-# SECTION 4: Helper Functions
+# SECTION 6: Helper Functions
 # ============================================================================
 
 info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -239,7 +239,7 @@ select_from_menu() {
 }
 
 # ============================================================================
-# SECTION 5: Path Normalization
+# SECTION 7: Path Normalization
 # ============================================================================
 
 # Normalize any path to absolute form
@@ -275,7 +275,7 @@ normalize_path() {
 }
 
 # ============================================================================
-# SECTION 6: Safe File Operations
+# SECTION 8: Safe File Operations
 # ============================================================================
 
 # Create timestamped backup
@@ -310,7 +310,7 @@ remove_if_exists() {
 }
 
 # ============================================================================
-# SECTION 7: Installation Detection
+# SECTION 9: Installation Detection
 # ============================================================================
 
 is_launcher_installed() {
@@ -337,7 +337,11 @@ is_hyprlock_service_installed() {
 }
 
 is_fully_installed() {
-    is_launcher_installed && is_fish_hook_installed && is_systemd_configured
+    # Check core components plus config file
+    is_launcher_installed && \
+    is_fish_hook_installed && \
+    is_systemd_configured && \
+    [[ -f "$CONFIG_FILE" ]]
 }
 
 is_sddm_enabled() {
@@ -379,16 +383,32 @@ EOF
 
 # Load installation configuration from previous install
 load_install_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
-        # shellcheck source=/dev/null
-        source "$CONFIG_FILE" 2>/dev/null || true
-        return 0
+    [[ -f "$CONFIG_FILE" ]] || return 1
+
+    # Validate config file syntax before sourcing (security + corruption check)
+    if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
+        warn "Config file has syntax errors: $CONFIG_FILE"
+        warn "Ignoring saved configuration - will use fresh detection"
+        return 1
     fi
-    return 1
+
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE" 2>/dev/null || {
+        warn "Failed to load config file"
+        return 1
+    }
+
+    # Validate loaded values are in expected range
+    if [[ -n "$SESSION_METHOD" ]] && [[ "$SESSION_METHOD" != "exec-once" && "$SESSION_METHOD" != "uwsm" ]]; then
+        warn "Invalid SESSION_METHOD in config: $SESSION_METHOD"
+        unset SESSION_METHOD
+    fi
+
+    return 0
 }
 
 # ============================================================================
-# SECTION 8: Dependency Checking
+# SECTION 10: Dependency Checking
 # ============================================================================
 
 check_dependencies() {
@@ -443,7 +463,7 @@ check_source_files() {
 }
 
 # ============================================================================
-# SECTION 9: System Detection
+# SECTION 11: System Detection
 # ============================================================================
 
 detect_username() {
@@ -533,7 +553,7 @@ is_hyprlock_running() {
 }
 
 # ============================================================================
-# SECTION 10: Present Detection Results
+# SECTION 12: Present Detection Results
 # ============================================================================
 
 present_username() {
@@ -891,7 +911,7 @@ show_detection_summary() {
 }
 
 # ============================================================================
-# SECTION 11: Installation Functions
+# SECTION 13: Installation Functions
 # ============================================================================
 
 install_launcher_script() {
@@ -1086,6 +1106,30 @@ show_execs_instructions() {
 
     # exec-once method: Guide user to add line to config
 
+    # Prevent hybrid configuration: warn if UWSM service already exists
+    if is_hyprlock_service_installed; then
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo -e "  ${RED}${BOLD}⚠️  HYBRID CONFIGURATION DETECTED${NC}"
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "  A hyprlock systemd service is already installed (UWSM method)."
+        echo "  Adding exec-once = hyprlock would create a HYBRID configuration"
+        echo "  where hyprlock starts TWICE - this will cause problems!"
+        echo ""
+        echo "  Options:"
+        echo "    1) Remove the service first: systemctl --user disable hyprlock.service"
+        echo "    2) Or switch to UWSM method: re-run installer and choose option 2"
+        echo ""
+        if ! ask "Continue anyway? (NOT RECOMMENDED)"; then
+            info "Skipping hyprlock configuration to prevent hybrid setup"
+            echo ""
+            read -p "Press Enter to continue..."
+            return
+        fi
+        warn "Proceeding with hybrid configuration - you may experience issues"
+    fi
+
     # Check if already configured and offer to skip
     if [[ ${#HYPRLOCK_CONFIGURED_FILES[@]} -gt 0 ]]; then
         echo ""
@@ -1153,7 +1197,7 @@ show_execs_instructions() {
 }
 
 # ============================================================================
-# SECTION 12: System-Level Installation (Sudo)
+# SECTION 14: System-Level Installation (Sudo)
 # ============================================================================
 
 request_sudo() {
@@ -1216,7 +1260,7 @@ EOF
 }
 
 # ============================================================================
-# SECTION 13: Staged Testing
+# SECTION 15: Staged Testing
 # ============================================================================
 
 setup_tty2_testing() {
@@ -1322,7 +1366,7 @@ confirm_test_passed() {
 }
 
 # ============================================================================
-# SECTION 14: SDDM Cutover
+# SECTION 16: SDDM Cutover
 # ============================================================================
 
 confirm_sddm_disable() {
@@ -1398,7 +1442,7 @@ show_final_instructions() {
 }
 
 # ============================================================================
-# SECTION 15: Uninstall Functions
+# SECTION 17: Uninstall Functions
 # ============================================================================
 
 uninstall() {
@@ -1479,7 +1523,7 @@ uninstall() {
 }
 
 # ============================================================================
-# SECTION 16: Update Mode
+# SECTION 18: Update Mode
 # ============================================================================
 
 update() {
@@ -1548,7 +1592,7 @@ update() {
 }
 
 # ============================================================================
-# SECTION 17: Main Installation
+# SECTION 19: Main Installation
 # ============================================================================
 
 install() {
@@ -1665,7 +1709,7 @@ install() {
 }
 
 # ============================================================================
-# SECTION 18: Argument Parsing
+# SECTION 20: Argument Parsing
 # ============================================================================
 
 SOURCE_ONLY=false
@@ -1687,7 +1731,7 @@ for arg in "$@"; do
 done
 
 # ============================================================================
-# SECTION 19: Entry Point
+# SECTION 21: Entry Point
 # ============================================================================
 
 # Skip execution when sourced for testing
