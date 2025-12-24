@@ -274,7 +274,14 @@ is_fish_hook_installed() {
 }
 
 is_systemd_configured() {
-    [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]
+    # Check file exists and is not empty
+    [[ -s "$SYSTEMD_OVERRIDE_FILE" ]] || return 1
+
+    # Validate it contains the autologin flag (core functionality)
+    grep -q -- '--autologin' "$SYSTEMD_OVERRIDE_FILE" || return 1
+
+    # Ensure placeholder was replaced (not still "YOUR_USERNAME")
+    ! grep -q 'YOUR_USERNAME' "$SYSTEMD_OVERRIDE_FILE"
 }
 
 is_hyprlock_service_installed() {
@@ -286,7 +293,8 @@ is_fully_installed() {
 }
 
 is_sddm_enabled() {
-    systemctl is-enabled sddm &>/dev/null
+    # Use timeout to prevent hanging if systemd is unresponsive
+    timeout 3 systemctl is-enabled sddm &>/dev/null
 }
 
 # Save installation configuration for future updates
@@ -297,13 +305,23 @@ save_install_config() {
 
     mkdir -p "$CONFIG_DIR" || { error "Failed to create config directory"; return 1; }
 
-    cat > "$CONFIG_FILE" <<EOF
+    if ! cat > "$CONFIG_FILE" <<EOF
 # hypr-login installation configuration
 # Generated: $(date -Iseconds)
 SESSION_METHOD=$SESSION_METHOD
 GPU_TYPE=$DETECTED_GPU_TYPE
 DRM_PATH=$DETECTED_DRM_PATH
 EOF
+    then
+        error "Failed to write config file"
+        return 1
+    fi
+
+    # Validate the file was actually written and is not empty
+    if [[ ! -s "$CONFIG_FILE" ]]; then
+        error "Config file is empty or missing after write"
+        return 1
+    fi
 
     success "Saved installation config to $CONFIG_FILE"
 }
@@ -360,7 +378,22 @@ check_source_files() {
 # ============================================================================
 
 detect_username() {
-    DETECTED_USERNAME=$(whoami)
+    # Safety check: block if running as actual root (not via sudo)
+    # Use ${SUDO_USER:-} to handle unset variable with set -u
+    if [[ $(whoami) == "root" && -z "${SUDO_USER:-}" ]]; then
+        error "This script should not be run as root"
+        error "Run as your normal user - it will request sudo when needed"
+        exit 1
+    fi
+
+    # If run with sudo, warn but use the original invoking user
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        warn "Running with sudo detected - using original user: $SUDO_USER"
+        warn "Tip: Run without sudo next time (script requests sudo when needed)"
+        DETECTED_USERNAME="$SUDO_USER"
+    else
+        DETECTED_USERNAME=$(whoami)
+    fi
 }
 
 detect_gpus() {
@@ -393,7 +426,9 @@ detect_display_outputs() {
 }
 
 detect_hyprland_config() {
-    HYPR_CONFIG_DIR=$(normalize_path "$HOME/.config/hypr")
+    # Respect XDG_CONFIG_HOME (defaults to ~/.config if not set)
+    local config_base="${XDG_CONFIG_HOME:-$HOME/.config}"
+    HYPR_CONFIG_DIR=$(normalize_path "$config_base/hypr")
     DETECTED_EXECS_FILES=()
 
     [[ -d "$HYPR_CONFIG_DIR" ]] || return
@@ -782,24 +817,33 @@ install_launcher_script() {
 
     mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
 
-    # Copy the base script
-    cp "$LAUNCHER_SRC" "$LAUNCHER_DEST" || { error "Failed to copy launcher script"; return 1; }
+    # Use temp file for atomic operations - only move to final destination if all succeeds
+    local temp_file
+    temp_file=$(mktemp) || { error "Failed to create temp file"; return 1; }
+    trap "rm -f '$temp_file'" RETURN
+
+    # Copy the base script to temp file
+    cp "$LAUNCHER_SRC" "$temp_file" || { error "Failed to copy launcher script"; return 1; }
 
     # Uncomment the appropriate GPU section based on detection
+    # All sed operations happen on temp file - atomic application
     case "$DETECTED_GPU_TYPE" in
         nvidia)
             # Uncomment NVIDIA lines
-            sed -i 's/^# set -gx LIBVA_DRIVER_NAME nvidia/set -gx LIBVA_DRIVER_NAME nvidia/' "$LAUNCHER_DEST"
-            sed -i 's/^# set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/' "$LAUNCHER_DEST"
-            sed -i 's/^# set -gx NVD_BACKEND direct/set -gx NVD_BACKEND direct/' "$LAUNCHER_DEST"
+            sed -i 's/^# set -gx LIBVA_DRIVER_NAME nvidia/set -gx LIBVA_DRIVER_NAME nvidia/' "$temp_file" &&
+            sed -i 's/^# set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/' "$temp_file" &&
+            sed -i 's/^# set -gx NVD_BACKEND direct/set -gx NVD_BACKEND direct/' "$temp_file" ||
+            { error "Failed to configure NVIDIA GPU settings"; return 1; }
             ;;
         amd)
             # Uncomment AMD line
-            sed -i 's/^# set -gx LIBVA_DRIVER_NAME radeonsi/set -gx LIBVA_DRIVER_NAME radeonsi/' "$LAUNCHER_DEST"
+            sed -i 's/^# set -gx LIBVA_DRIVER_NAME radeonsi/set -gx LIBVA_DRIVER_NAME radeonsi/' "$temp_file" ||
+            { error "Failed to configure AMD GPU settings"; return 1; }
             ;;
         intel)
             # Uncomment Intel line
-            sed -i 's/^# set -gx LIBVA_DRIVER_NAME iHD/set -gx LIBVA_DRIVER_NAME iHD/' "$LAUNCHER_DEST"
+            sed -i 's/^# set -gx LIBVA_DRIVER_NAME iHD/set -gx LIBVA_DRIVER_NAME iHD/' "$temp_file" ||
+            { error "Failed to configure Intel GPU settings"; return 1; }
             ;;
         auto|*)
             # Leave all commented - user must configure manually
@@ -817,10 +861,14 @@ install_launcher_script() {
         sed -i "2i\\
 # DRM path set by installer\\
 set -gx HYPR_DRM_PATH \"$escaped_drm_path\"\\
-" "$LAUNCHER_DEST"
+" "$temp_file" || { error "Failed to set DRM path"; return 1; }
     fi
 
-    chmod +x "$LAUNCHER_DEST" || { error "Failed to make script executable"; return 1; }
+    chmod +x "$temp_file" || { error "Failed to make script executable"; return 1; }
+
+    # Atomic move: only replace destination if all above succeeded
+    mv "$temp_file" "$LAUNCHER_DEST" || { error "Failed to install launcher script"; return 1; }
+    trap - RETURN  # Clear the trap since move succeeded
     success "Launcher script installed: $LAUNCHER_DEST"
 }
 
