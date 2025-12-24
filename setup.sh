@@ -144,6 +144,23 @@ cleanup_on_interrupt() {
 trap cleanup_on_interrupt INT TERM
 
 # ============================================================================
+# SECTION 3c: Concurrent Execution Lock
+# ============================================================================
+
+# Prevent multiple instances from running simultaneously
+LOCK_FILE="/tmp/hypr-login-install.lock"
+acquire_lock() {
+    exec 200>"$LOCK_FILE"
+    if ! flock -n 200; then
+        error "Another hypr-login installation is already running"
+        echo "  If this is incorrect, remove: $LOCK_FILE"
+        exit 1
+    fi
+}
+acquire_lock
+trap 'flock -u 200 2>/dev/null; cleanup_on_interrupt' INT TERM
+
+# ============================================================================
 # SECTION 4: Helper Functions
 # ============================================================================
 
@@ -287,7 +304,7 @@ remove_if_exists() {
     if $DRY_RUN; then
         echo "$(dry_run_prefix)Would remove: $path"
     else
-        rm -rf "$path"
+        rm -rf "$path" || { error "Failed to remove: $path"; return 1; }
         success "Removed $description"
     fi
 }
@@ -1225,6 +1242,7 @@ setup_tty2_testing() {
     else
         warn "Could not start getty@tty2 - you may need to start it manually"
         warn "Try: sudo systemctl start getty@tty2"
+        return 1
     fi
 }
 
@@ -1370,7 +1388,10 @@ show_final_instructions() {
     echo ""
 
     if ask_yes "Reboot now?"; then
-        sudo reboot
+        sudo reboot || {
+            error "Reboot command failed"
+            echo "  Run manually: sudo reboot"
+        }
     else
         info "Remember to reboot to apply changes"
     fi
