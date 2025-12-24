@@ -92,6 +92,7 @@ DETECTED_GPUS=()
 DETECTED_DRM_PATH=""
 DETECTED_OUTPUTS=()
 DETECTED_EXECS_FILES=()
+HYPRLOCK_CONFIGURED_FILES=()
 HYPR_CONFIG_DIR=""
 
 # Session method: "exec-once" (TTY/direct) or "uwsm" (systemd service)
@@ -276,12 +277,45 @@ is_systemd_configured() {
     [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]
 }
 
+is_hyprlock_service_installed() {
+    [[ -f "$HYPRLOCK_SERVICE_DEST" ]]
+}
+
 is_fully_installed() {
     is_launcher_installed && is_fish_hook_installed && is_systemd_configured
 }
 
 is_sddm_enabled() {
     systemctl is-enabled sddm &>/dev/null
+}
+
+# Save installation configuration for future updates
+save_install_config() {
+    if dry_run_preview "Would save config to: $CONFIG_FILE"; then
+        return 0
+    fi
+
+    mkdir -p "$CONFIG_DIR" || { error "Failed to create config directory"; return 1; }
+
+    cat > "$CONFIG_FILE" <<EOF
+# hypr-login installation configuration
+# Generated: $(date -Iseconds)
+SESSION_METHOD=$SESSION_METHOD
+GPU_TYPE=$DETECTED_GPU_TYPE
+DRM_PATH=$DETECTED_DRM_PATH
+EOF
+
+    success "Saved installation config to $CONFIG_FILE"
+}
+
+# Load installation configuration from previous install
+load_install_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        return 0
+    fi
+    return 1
 }
 
 # ============================================================================
@@ -368,6 +402,29 @@ detect_hyprland_config() {
     while IFS= read -r -d '' file; do
         DETECTED_EXECS_FILES+=("$file")
     done < <(find "$HYPR_CONFIG_DIR" -name "execs*.conf" -print0 2>/dev/null | sort -z)
+}
+
+# Scan config files for existing hyprlock exec-once lines
+# Populates: HYPRLOCK_CONFIGURED_FILES[]
+detect_hyprlock_in_config() {
+    HYPRLOCK_CONFIGURED_FILES=()
+
+    [[ ${#DETECTED_EXECS_FILES[@]} -eq 0 ]] && return
+
+    for file in "${DETECTED_EXECS_FILES[@]}"; do
+        [[ -f "$file" ]] || continue
+
+        # Match: exec-once = hyprlock (with optional spaces and arguments)
+        # Exclude: commented lines (# at start, possibly with leading whitespace)
+        if grep -qE '^[^#]*exec-once\s*=\s*hyprlock(\s|$)' "$file" 2>/dev/null; then
+            HYPRLOCK_CONFIGURED_FILES+=("$file")
+        fi
+    done
+}
+
+# Check if hyprlock is currently running
+is_hyprlock_running() {
+    pgrep -x hyprlock >/dev/null 2>&1
 }
 
 # ============================================================================
@@ -523,12 +580,29 @@ present_config_info() {
             echo "    • ~/$rel_path"
         done
     fi
+
+    # Show hyprlock running status (informational)
+    if is_hyprlock_running; then
+        info "hyprlock is currently running"
+    fi
+
+    # Show if hyprlock already configured in any files
+    if [[ ${#HYPRLOCK_CONFIGURED_FILES[@]} -gt 0 ]]; then
+        echo ""
+        warn "hyprlock already configured in:"
+        for file in "${HYPRLOCK_CONFIGURED_FILES[@]}"; do
+            local rel_path="${file#$HOME/}"
+            echo "    • ~/$rel_path"
+        done
+    fi
 }
 
 # Check if UWSM is active (for auto-detection helper)
+# Uses timeout to prevent hanging if systemd is unresponsive
 check_uwsm_status() {
     local status
-    status=$(systemctl --user is-active uwsm-app@Hyprland.service 2>&1)
+    # 3-second timeout prevents indefinite hang
+    status=$(timeout 3 systemctl --user is-active uwsm-app@Hyprland.service 2>&1) || status="timeout"
 
     case "$status" in
         active)
@@ -818,8 +892,8 @@ remove_hyprlock_service() {
 
     # Disable first, then remove
     systemctl --user disable hyprlock.service 2>/dev/null || true
-    rm -f "$HYPRLOCK_SERVICE_DEST"
-    systemctl --user daemon-reload
+    rm -f "$HYPRLOCK_SERVICE_DEST" || { warn "Could not remove service file"; }
+    systemctl --user daemon-reload || { warn "Failed to reload user systemd"; }
 
     success "Removed hyprlock systemd service"
 }
@@ -850,6 +924,30 @@ show_execs_instructions() {
     fi
 
     # exec-once method: Guide user to add line to config
+
+    # Check if already configured and offer to skip
+    if [[ ${#HYPRLOCK_CONFIGURED_FILES[@]} -gt 0 ]]; then
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo -e "  ${YELLOW}${BOLD}⚠️  HYPRLOCK ALREADY CONFIGURED${NC}"
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "  Found existing hyprlock configuration in:"
+        for file in "${HYPRLOCK_CONFIGURED_FILES[@]}"; do
+            local rel_path="${file#$HOME/}"
+            echo "      • ~/$rel_path"
+        done
+        echo ""
+
+        if ! ask "Add hyprlock to config anyway? (creates duplicate)"; then
+            success "Skipping hyprlock configuration (already present)"
+            echo ""
+            read -p "Press Enter to continue..."
+            return
+        fi
+        warn "Proceeding - you may have duplicate hyprlock entries"
+    fi
+
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${BOLD}MANUAL STEP REQUIRED: Add hyprlock to your config${NC}"
@@ -1131,6 +1229,16 @@ uninstall() {
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
 
+    # Load saved configuration to know which method was used
+    local was_uwsm=false
+    if load_install_config && [[ "$SESSION_METHOD" == "uwsm" ]]; then
+        was_uwsm=true
+        info "Detected UWSM installation"
+    elif is_hyprlock_service_installed; then
+        was_uwsm=true
+        info "Detected hyprlock systemd service"
+    fi
+
     if ! ask_yes "Remove all hypr-login components?"; then
         info "Uninstall cancelled"
         exit 0
@@ -1143,7 +1251,12 @@ uninstall() {
     remove_if_exists "$FISH_HOOK_DEST" "Fish hook"
 
     # Remove hyprlock systemd service (if installed for UWSM)
-    remove_hyprlock_service
+    if $was_uwsm || is_hyprlock_service_installed; then
+        remove_hyprlock_service
+    fi
+
+    # Remove config file
+    remove_if_exists "$CONFIG_FILE" "Installation config"
 
     # Remove systemd override (requires sudo)
     if [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]; then
@@ -1160,7 +1273,11 @@ uninstall() {
 
     echo ""
     echo -e "  ${YELLOW}Remaining manual steps:${NC}"
-    echo "    1. Remove 'exec-once = hyprlock' from your execs.conf (if used)"
+    if $was_uwsm; then
+        echo "    1. (UWSM method) No manual hyprlock config changes needed"
+    else
+        echo "    1. Remove 'exec-once = hyprlock' from your execs.conf"
+    fi
     echo -e "    2. Re-enable SDDM: ${CYAN}sudo systemctl enable sddm${NC}"
     echo "    3. Reboot"
     echo ""
@@ -1199,6 +1316,13 @@ update() {
         return
     fi
 
+    # Load saved configuration from previous install
+    if load_install_config; then
+        info "Loaded previous configuration (session method: ${SESSION_METHOD:-unknown})"
+    else
+        info "No saved configuration found"
+    fi
+
     check_source_files
 
     # Backup and update launcher
@@ -1213,6 +1337,18 @@ update() {
     # Install updated files
     install_launcher_script
     install_fish_hook
+
+    # Update hyprlock service if UWSM method was used
+    if [[ "$SESSION_METHOD" == "uwsm" ]] || is_hyprlock_service_installed; then
+        if is_hyprlock_service_installed; then
+            info "Updating hyprlock systemd service..."
+            backup_file "$HYPRLOCK_SERVICE_DEST"
+            install_hyprlock_service
+        elif [[ "$SESSION_METHOD" == "uwsm" ]]; then
+            info "Installing hyprlock systemd service (UWSM method)..."
+            install_hyprlock_service
+        fi
+    fi
 
     # Check systemd configuration
     if ! is_systemd_configured; then
@@ -1286,6 +1422,7 @@ install() {
     detect_gpus
     detect_display_outputs
     detect_hyprland_config
+    detect_hyprlock_in_config
 
     # Present and confirm
     present_username
@@ -1294,6 +1431,9 @@ install() {
     present_config_info
     present_session_method
     show_detection_summary
+
+    # Save configuration for future updates
+    save_install_config
 
     # Phase 2: User-level installation
     echo ""
