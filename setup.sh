@@ -134,6 +134,22 @@ cleanup_on_interrupt() {
         echo "  To retry, run: ./setup.sh"
     fi
 
+    # Terminate any child processes (including sudo commands)
+    # Use SIGTERM first for graceful shutdown
+    local children
+    children=$(jobs -p 2>/dev/null)
+    if [[ -n "$children" ]]; then
+        # shellcheck disable=SC2086
+        kill -TERM $children 2>/dev/null || true
+        sleep 0.5
+        # Force kill any remaining
+        # shellcheck disable=SC2086
+        kill -KILL $children 2>/dev/null || true
+    fi
+
+    # Also kill any direct child processes not captured by jobs
+    pkill -TERM -P $$ 2>/dev/null || true
+
     # Clean up any temp files that might exist
     rm -f /tmp/hypr-login-*.tmp 2>/dev/null || true
 
@@ -583,17 +599,56 @@ declare -A GPU_DRIVER_MAP=(
 
 # Classify detected GPUs and display them
 # Sets: GPU_TYPES_IN_ORDER (array of "value:Label" pairs in detection order), GPU_TYPE_COUNT
+# Also warns about unrecognized drivers and duplicate GPU types
 GPU_TYPES_IN_ORDER=()
 GPU_TYPE_COUNT=0
 classify_detected_gpus() {
     GPU_TYPES_IN_ORDER=()
     GPU_TYPE_COUNT=0
     local -A seen=()
+    local -A driver_count=()
+    local unknown_drivers=()
 
+    # First pass: count drivers and display cards
     for gpu in "${DETECTED_GPUS[@]}"; do
         local card="${gpu%%:*}"
         local driver="${gpu##*:}"
-        echo "    • $card: $driver"
+
+        # Track driver occurrences for duplicate detection
+        ((driver_count[$driver]++)) || driver_count[$driver]=1
+
+        # Display with card number prominently
+        if [[ -v "GPU_DRIVER_MAP[$driver]" ]]; then
+            local label="${GPU_DRIVER_MAP[$driver]##*:}"
+            echo "    • $card: $label ($driver driver)"
+        else
+            echo "    • $card: $driver (unknown driver)"
+            if [[ ! " ${unknown_drivers[*]} " =~ " $driver " ]]; then
+                unknown_drivers+=("$driver")
+            fi
+        fi
+    done
+
+    # Warn about unrecognized GPU drivers
+    if [[ ${#unknown_drivers[@]} -gt 0 ]]; then
+        echo ""
+        warn "Unrecognized GPU driver(s): ${unknown_drivers[*]}"
+        echo "      Known drivers: ${!GPU_DRIVER_MAP[*]}"
+        echo "      GPU env vars will use auto-detection for unknown drivers"
+    fi
+
+    # Check for duplicate GPU types (e.g., two NVIDIA cards)
+    for driver in "${!driver_count[@]}"; do
+        if [[ ${driver_count[$driver]} -gt 1 ]] && [[ -v "GPU_DRIVER_MAP[$driver]" ]]; then
+            echo ""
+            info "Multiple ${GPU_DRIVER_MAP[$driver]##*:} GPUs detected (${driver_count[$driver]} cards)"
+            echo "      Pay attention to Display Output selection to target the correct card"
+        fi
+    done
+
+    # Second pass: build selection list
+    for gpu in "${DETECTED_GPUS[@]}"; do
+        local driver="${gpu##*:}"
 
         # Add to list if known driver and not yet seen
         if [[ -v "GPU_DRIVER_MAP[$driver]" ]] && [[ ! -v "seen[$driver]" ]]; then
@@ -1496,6 +1551,28 @@ uninstall() {
 
     # Remove config file
     remove_if_exists "$CONFIG_FILE" "Installation config"
+
+    # Clean up backup files created during installation/updates
+    local backup_count=0
+    local -a backup_dirs=("$LOCAL_BIN" "$FISH_CONF_DIR" "$HYPRLOCK_SERVICE_DEST")
+
+    for dir in "${backup_dirs[@]}"; do
+        local parent_dir
+        parent_dir=$(dirname "$dir")
+        if [[ -d "$parent_dir" ]]; then
+            while IFS= read -r -d '' bak_file; do
+                if $DRY_RUN; then
+                    echo "$(dry_run_prefix)Would remove backup: $bak_file"
+                else
+                    rm -f "$bak_file" && ((backup_count++))
+                fi
+            done < <(find "$parent_dir" -maxdepth 1 -name "*.backup.*" -type f -print0 2>/dev/null)
+        fi
+    done
+
+    if [[ $backup_count -gt 0 ]]; then
+        success "Cleaned up $backup_count backup file(s)"
+    fi
 
     # Remove systemd override (requires sudo)
     if [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]; then
