@@ -1381,10 +1381,28 @@ confirm_test_passed() {
         return 0
     fi
 
+    local test_attempts=0
+    local max_attempts=5
+
     while true; do
         if ask "Did the tty2 test SUCCEED? (Hyprland started, hyprlock appeared)"; then
             success "Test passed! Ready for SDDM cutover"
             return 0
+        fi
+
+        ((test_attempts++))
+        if ((test_attempts >= max_attempts)); then
+            echo ""
+            error "Test unsuccessful after multiple attempts"
+            echo ""
+            echo "  The tty2 test didn't pass. This usually means:"
+            echo "    • Hyprland config issue (check ~/.hyprland.log)"
+            echo "    • GPU environment variables need adjustment"
+            echo "    • hyprlock not configured correctly"
+            echo ""
+            echo "  User-level components are installed."
+            echo "  Fix the underlying issue and re-run the installer."
+            exit 1
         fi
 
         warn "Test did not pass"
@@ -1407,7 +1425,24 @@ confirm_test_passed() {
                 read -p "Press Enter to continue..."
                 ;;
             2)
-                "${EDITOR:-nano}" "$LAUNCHER_DEST"
+                # Find a working editor: EDITOR, then common defaults
+                local edit_cmd=""
+                if [[ -n "${EDITOR:-}" ]] && command -v "$EDITOR" >/dev/null 2>&1; then
+                    edit_cmd="$EDITOR"
+                else
+                    for candidate in nano vim nvim vi; do
+                        if command -v "$candidate" >/dev/null 2>&1; then
+                            edit_cmd="$candidate"
+                            break
+                        fi
+                    done
+                fi
+                if [[ -n "$edit_cmd" ]]; then
+                    "$edit_cmd" "$LAUNCHER_DEST" || warn "Editor exited with error"
+                else
+                    warn "No editor found (tried: \$EDITOR, nano, vim, nvim, vi)"
+                    echo "  Edit manually: $LAUNCHER_DEST"
+                fi
                 ;;
             3)
                 guide_tty2_test
@@ -1570,7 +1605,7 @@ uninstall() {
             if $DRY_RUN; then
                 echo "$(dry_run_prefix)Would remove: $SYSTEMD_OVERRIDE_DEST"
             else
-                sudo rm -f "$SYSTEMD_OVERRIDE_DEST"
+                sudo rm -f "$SYSTEMD_OVERRIDE_DEST" || warn "Could not remove systemd override"
                 systemctl_safe --sudo daemon-reload || warn "Systemd reload timed out"
                 success "Removed systemd override"
             fi
