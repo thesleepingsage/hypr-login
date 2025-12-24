@@ -810,8 +810,11 @@ present_session_method() {
                 fi
 
                 present_session_method_help
-                # Help returns 0 if system check was done, 1 if user chose manual figuring
-                # Either way, loop back to main selection (SESSION_METHOD still unset)
+                # If help flow auto-detected and set SESSION_METHOD, we're done
+                if [[ -n "$SESSION_METHOD" ]]; then
+                    return 0
+                fi
+                # Otherwise, loop back to main selection
                 echo ""
                 echo "    1) Direct/TTY autologin (exec-once method)"
                 echo "    2) UWSM managed session (systemd service method)"
@@ -847,17 +850,27 @@ present_session_method_help() {
                 active)
                     echo ""
                     echo -e "  ${GREEN}Result: UWSM is active${NC}"
-                    echo "  → You're using UWSM. Select option 2."
+                    echo "  → Auto-selecting UWSM method..."
+                    SESSION_METHOD="uwsm"
+                    success "Session method: uwsm (auto-detected)"
+                    return 0  # Exit help flow with method set
                     ;;
-                inactive)
+                inactive|not-found)
                     echo ""
-                    echo -e "  ${CYAN}Result: UWSM service exists but is inactive${NC}"
-                    echo "  → You're likely using Direct/TTY. Select option 1."
+                    if [[ "$uwsm_status" == "inactive" ]]; then
+                        echo -e "  ${CYAN}Result: UWSM service exists but is inactive${NC}"
+                    else
+                        echo -e "  ${CYAN}Result: UWSM not installed or not configured${NC}"
+                    fi
+                    echo "  → Auto-selecting exec-once method..."
+                    SESSION_METHOD="exec-once"
+                    success "Session method: exec-once (auto-detected)"
+                    return 0  # Exit help flow with method set
                     ;;
-                not-found)
+                failed)
                     echo ""
-                    echo -e "  ${CYAN}Result: UWSM not installed or not configured${NC}"
-                    echo "  → You're using Direct/TTY. Select option 1."
+                    echo -e "  ${YELLOW}Result: UWSM service exists but is in failed state${NC}"
+                    echo "  → Cannot auto-detect. Please select manually."
                     ;;
             esac
             echo ""
@@ -936,30 +949,30 @@ install_launcher_script() {
     # All sed operations happen on temp file - atomic application
     case "$DETECTED_GPU_TYPE" in
         nvidia)
-            # Uncomment NVIDIA lines
+            info "Configuring NVIDIA GPU settings..."
             sed -i 's/^# set -gx LIBVA_DRIVER_NAME nvidia/set -gx LIBVA_DRIVER_NAME nvidia/' "$temp_file" &&
             sed -i 's/^# set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/' "$temp_file" &&
             sed -i 's/^# set -gx NVD_BACKEND direct/set -gx NVD_BACKEND direct/' "$temp_file" ||
             { error "Failed to configure NVIDIA GPU settings"; return 1; }
             ;;
         amd)
-            # Uncomment AMD line
+            info "Configuring AMD GPU settings..."
             sed -i 's/^# set -gx LIBVA_DRIVER_NAME radeonsi/set -gx LIBVA_DRIVER_NAME radeonsi/' "$temp_file" ||
             { error "Failed to configure AMD GPU settings"; return 1; }
             ;;
         intel)
-            # Uncomment Intel line
+            info "Configuring Intel GPU settings..."
             sed -i 's/^# set -gx LIBVA_DRIVER_NAME iHD/set -gx LIBVA_DRIVER_NAME iHD/' "$temp_file" ||
             { error "Failed to configure Intel GPU settings"; return 1; }
             ;;
         auto|*)
-            # Leave all commented - user must configure manually
-            warn "GPU type 'auto' - you'll need to uncomment the appropriate GPU section in the script"
+            info "GPU type 'auto' - leaving configuration for runtime detection"
             ;;
     esac
 
     # If specific DRM path was chosen, add it to the script
     if [[ "$DETECTED_DRM_PATH" != "auto" ]]; then
+        info "Setting DRM path: $DETECTED_DRM_PATH"
         # Escape path for sed - handle all special characters
         # Order matters: backslashes first, then other special chars
         local escaped_drm_path="${DETECTED_DRM_PATH//\\/\\\\}"  # \ -> \\
@@ -1354,12 +1367,15 @@ confirm_test_passed() {
             3)
                 guide_tty2_test
                 ;;
-            *)
+            4)
                 info "Exiting - SDDM not modified"
                 echo ""
                 echo "  User-level components are installed."
                 echo "  Fix issues and re-run installer when ready."
                 exit 0
+                ;;
+            *)
+                warn "Invalid choice. Please enter 1-4."
                 ;;
         esac
     done
@@ -1612,6 +1628,14 @@ install() {
     echo "  Requirements:"
     echo "    • Hyprland, hyprlock, Fish shell installed"
     echo "    • Willingness to test on tty2 before full cutover"
+    echo ""
+    echo "  Installation phases:"
+    echo "    1. Pre-flight checks (dependencies, source files)"
+    echo "    2. System detection (GPU, display, session method)"
+    echo "    3. User-level install (scripts, fish hook)"
+    echo "    4. System-level install (systemd autologin)"
+    echo "    5. Staged testing (verify on tty2)"
+    echo "    6. SDDM cutover (disable display manager)"
     echo ""
 
     if $DRY_RUN; then
