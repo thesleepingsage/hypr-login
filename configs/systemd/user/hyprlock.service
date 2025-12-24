@@ -1,0 +1,28 @@
+# Systemd user service for hyprlock (UWSM method)
+#
+# This service starts hyprlock when graphical-session.target is reached,
+# which happens when Hyprland is ready under UWSM.
+#
+# Installation:
+#   mkdir -p ~/.config/systemd/user
+#   cp hyprlock.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable hyprlock.service
+#
+# Note: Do NOT use 'exec-once = hyprlock' in your Hyprland config
+# when using this service - it handles startup automatically.
+
+[Unit]
+Description=Hyprland screen lock daemon
+Documentation=https://wiki.hyprland.org/Hypr-Ecosystem/hyprlock
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hyprlock
+Restart=no
+
+[Install]
+WantedBy=graphical-session.target

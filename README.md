@@ -16,6 +16,7 @@ systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
 
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
+- [Session Methods](#session-methods)
 - [Before You Begin: Customization Checklist](#before-you-begin-customization-checklist)
 - [Architecture](#architecture)
   - [Repository Structure](#repository-structure)
@@ -36,6 +37,7 @@ systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
 - [Credential Manager Setup](#credential-manager-setup)
 - [Verification Commands](#verification-commands)
 - [Complete File Contents](#complete-file-contents)
+- [Extras](#extras)
 - [Sources](#sources)
 
 ---
@@ -91,6 +93,54 @@ TTY Autologin Way:
 | Fish shell | Primary shell (bash/zsh possible with modifications) |
 | systemd | For getty and autologin |
 | NVIDIA, AMD, or Intel GPU | GPU-specific DRM paths and env vars differ |
+
+---
+
+## Session Methods
+
+The installer supports two methods for starting hyprlock, depending on how you start Hyprland:
+
+### Method 1: exec-once (Direct/TTY Autologin)
+
+This is the **default method** for users who start Hyprland from a TTY (either manually or via autologin).
+
+**How it works:**
+- hyprlock is started via `exec-once = hyprlock` in your Hyprland config
+- It runs as the first thing when Hyprland starts
+- No systemd service needed
+
+**Use this if:**
+- You use this project's TTY autologin setup
+- You start Hyprland from `.bashrc`, `.zshrc`, or Fish config
+- You manually run `Hyprland` from a TTY
+
+### Method 2: UWSM (Systemd Service)
+
+This method is for users who use **UWSM** (Universal Wayland Session Manager) to manage their Hyprland session.
+
+**How it works:**
+- hyprlock runs as a systemd user service (`hyprlock.service`)
+- It starts when `graphical-session.target` is reached
+- Managed entirely by systemd
+
+**Use this if:**
+- You run `uwsm start hyprland` or similar
+- You use a display manager that integrates with UWSM
+- Your Hyprland session is managed by systemd
+
+### How to Choose
+
+The installer will ask you which method to use. If you're unsure:
+
+```bash
+# Check if UWSM is managing your session
+systemctl --user is-active uwsm-app@Hyprland.service
+```
+
+- `active` → You're using UWSM (Method 2)
+- `inactive` or `not found` → You're using Direct/TTY (Method 1)
+
+> **⚠️ Important**: Choosing the wrong method will prevent hyprlock from starting on boot!
 
 ---
 
@@ -924,6 +974,26 @@ The logout action gives you a fresh session with all `exec-once` commands re-run
 
 - **`start-hyprland` wrapper**: Hyprland may introduce a `start-hyprland` wrapper script in the future. If/when this happens, update the launcher script to use it instead of calling `Hyprland` directly.
 - **Environment variables**: As Hyprland evolves, more env vars may be set internally. Check release notes when updating. Currently, Hyprland sets `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, `XDG_BACKEND`, `MOZ_ENABLE_WAYLAND`, `_JAVA_AWT_WM_NONREPARENTING`, `DISPLAY`, and `WAYLAND_DISPLAY` internally.
+
+---
+
+## Extras
+
+The `extras/` folder contains optional utilities that aren't part of the core installation but may be useful for certain setups.
+
+### hyprlock-wrapper
+
+**Location:** [`extras/hyprlock-wrapper/`](extras/hyprlock-wrapper/)
+
+A boot-aware wrapper script that uses different hyprlock configurations for:
+- **Login (first lock after boot)** - Uses a static wallpaper
+- **Manual locks (subsequent)** - Uses `path = screenshot`
+
+**The Problem:** If your `hyprlock.conf` uses `path = screenshot` for the background, the first lock screen after boot has nothing to screenshot - you'll see the default Hyprland wallpaper or a blank screen.
+
+**The Solution:** The wrapper detects boot cycles using the kernel's `boot_id` and switches between two configs automatically.
+
+See [`extras/hyprlock-wrapper/README.md`](extras/hyprlock-wrapper/README.md) for installation instructions.
 
 ---
 

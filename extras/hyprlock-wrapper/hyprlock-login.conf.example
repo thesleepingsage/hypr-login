@@ -1,0 +1,46 @@
+#
+# hyprlock-login.conf.example
+#
+# This is a login-specific hyprlock config that uses a STATIC wallpaper
+# instead of "path = screenshot". Use this for the first lock after boot.
+#
+# Why? On boot, there's nothing behind hyprlock to screenshot - you'd just
+# see the default Hyprland wallpaper or a blank screen.
+#
+# Setup:
+#   1. Copy your existing hyprlock.conf to hyprlock-login.conf
+#   2. Change "path = screenshot" to a static wallpaper path
+#   3. The wrapper script will use this config on boot only
+#
+
+# Example: Source your colors (adjust path as needed)
+# source = ~/.config/hypr/hyprlockColors.conf
+
+general {
+    disable_loading_bar = false
+    grace = 0
+    no_fade_in = false
+    hide_cursor = true
+}
+
+background {
+    monitor =
+    # IMPORTANT: Use a static wallpaper path instead of "screenshot"
+    # Replace this with your actual wallpaper path
+    path = /home/YOUR_USERNAME/Pictures/Wallpapers/your-wallpaper.jpg
+    blur_passes = 4
+    blur_size = 7
+}
+
+# Add your other hyprlock elements here (labels, input-field, image, etc.)
+# Copy them from your existing hyprlock.conf
+
+input-field {
+    monitor =
+    size = 200, 50
+    outline_thickness = 2
+    fade_on_empty = false
+    dots_center = true
+    halign = center
+    valign = center
+}

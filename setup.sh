@@ -94,6 +94,13 @@ DETECTED_OUTPUTS=()
 DETECTED_EXECS_FILES=()
 HYPR_CONFIG_DIR=""
 
+# Session method: "exec-once" (TTY/direct) or "uwsm" (systemd service)
+SESSION_METHOD=""
+
+# Hyprlock service paths (for UWSM method)
+HYPRLOCK_SERVICE_SRC="$SCRIPT_DIR/configs/systemd/user/hyprlock.service"
+HYPRLOCK_SERVICE_DEST="$HOME/.config/systemd/user/hyprlock.service"
+
 # ============================================================================
 # SECTION 3: Colors
 # ============================================================================
@@ -518,16 +525,165 @@ present_config_info() {
     fi
 }
 
+# Check if UWSM is active (for auto-detection helper)
+check_uwsm_status() {
+    local status
+    status=$(systemctl --user is-active uwsm-app@Hyprland.service 2>&1)
+
+    case "$status" in
+        active)
+            echo "active"
+            ;;
+        inactive)
+            echo "inactive"
+            ;;
+        *)
+            # "unknown", "could not be found", etc.
+            echo "not-found"
+            ;;
+    esac
+}
+
+# Present session method selection (UWSM vs exec-once)
+# Sets: SESSION_METHOD to "exec-once" or "uwsm"
+present_session_method() {
+    local max_help_attempts=5
+    local help_attempts=0
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "  ${BOLD}SESSION METHOD: How do you start Hyprland?${NC}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    echo -e "  ${YELLOW}⚠️  Choosing the wrong method will prevent hyprlock from starting!${NC}"
+    echo ""
+    echo "    1) Direct/TTY autologin (exec-once method)"
+    echo "       You log into a TTY and Hyprland starts automatically or manually"
+    echo ""
+    echo "    2) UWSM managed session (systemd service method)"
+    echo "       You use 'uwsm start hyprland' or a UWSM-based display manager"
+    echo ""
+    echo "    3) I don't know / Not sure"
+    echo "       Get help figuring out which method you use"
+    echo ""
+
+    while true; do
+        echo -n "  Choose [1-3]: "
+        read -r method_choice
+
+        case "$method_choice" in
+            1)
+                SESSION_METHOD="exec-once"
+                success "Session method: exec-once (hyprlock added to Hyprland config)"
+                return 0
+                ;;
+            2)
+                SESSION_METHOD="uwsm"
+                success "Session method: UWSM (hyprlock as systemd service)"
+                return 0
+                ;;
+            3)
+                ((help_attempts++))
+                if ((help_attempts >= max_help_attempts)); then
+                    echo ""
+                    error "Maximum help attempts reached ($max_help_attempts)"
+                    echo "  Please determine your session method and re-run the installer."
+                    echo "  Hint: Run 'systemctl --user is-active uwsm-app@Hyprland.service'"
+                    echo ""
+                    exit 1
+                fi
+
+                present_session_method_help
+                # Help returns 0 if system check was done, 1 if user chose manual figuring
+                # Either way, loop back to main selection (SESSION_METHOD still unset)
+                echo ""
+                echo "    1) Direct/TTY autologin (exec-once method)"
+                echo "    2) UWSM managed session (systemd service method)"
+                echo "    3) I don't know / Not sure"
+                echo ""
+                ;;
+            *)
+                warn "Invalid choice. Please enter 1, 2, or 3."
+                ;;
+        esac
+    done
+}
+
+# Help flow for users who don't know their session method
+present_session_method_help() {
+    echo ""
+    echo "  Would you like us to check your system?"
+    echo ""
+    echo "    1) Yes, check my system"
+    echo "    2) No, I'll figure it out myself"
+    echo ""
+    echo -n "  Choose [1-2]: "
+    read -r help_choice
+
+    case "$help_choice" in
+        1)
+            echo ""
+            info "Checking for UWSM..."
+            local uwsm_status
+            uwsm_status=$(check_uwsm_status)
+
+            case "$uwsm_status" in
+                active)
+                    echo ""
+                    echo -e "  ${GREEN}Result: UWSM is active${NC}"
+                    echo "  → You're using UWSM. Select option 2."
+                    ;;
+                inactive)
+                    echo ""
+                    echo -e "  ${CYAN}Result: UWSM service exists but is inactive${NC}"
+                    echo "  → You're likely using Direct/TTY. Select option 1."
+                    ;;
+                not-found)
+                    echo ""
+                    echo -e "  ${CYAN}Result: UWSM not installed or not configured${NC}"
+                    echo "  → You're using Direct/TTY. Select option 1."
+                    ;;
+            esac
+            echo ""
+            read -p "  Press Enter to continue..."
+            ;;
+        2)
+            echo ""
+            echo "  To figure out which method you use:"
+            echo ""
+            echo "    • If you installed via this project's TTY autologin → Option 1"
+            echo "    • If you run 'uwsm start hyprland' → Option 2"
+            echo "    • If you use a display manager with UWSM → Option 2"
+            echo "    • If Hyprland starts from your .bashrc/.zshrc/.config/fish → Option 1"
+            echo ""
+            echo "  Re-run the installer when you know your setup."
+            echo ""
+            if ! ask "Continue anyway?"; then
+                info "Installation cancelled"
+                exit 0
+            fi
+            # User chose to continue without knowing - they must still select a method
+            return 1
+            ;;
+        *)
+            warn "Invalid choice"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 show_detection_summary() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${BOLD}SYSTEM DETECTION SUMMARY${NC}"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
-    echo "  Username:     $DETECTED_USERNAME"
-    echo "  GPU type:     $DETECTED_GPU_TYPE"
-    echo "  DRM path:     $DETECTED_DRM_PATH"
-    echo "  Config dir:   $HYPR_CONFIG_DIR"
+    echo "  Username:       $DETECTED_USERNAME"
+    echo "  GPU type:       $DETECTED_GPU_TYPE"
+    echo "  DRM path:       $DETECTED_DRM_PATH"
+    echo "  Config dir:     $HYPR_CONFIG_DIR"
+    echo "  Session method: $SESSION_METHOD"
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
@@ -607,7 +763,93 @@ install_fish_hook() {
     success "Fish hook installed: $FISH_HOOK_DEST"
 }
 
+# Install hyprlock as a systemd user service (for UWSM method)
+install_hyprlock_service() {
+    local dest_dir
+    dest_dir=$(dirname "$HYPRLOCK_SERVICE_DEST")
+
+    if dry_run_preview "Would create: $HYPRLOCK_SERVICE_DEST"; then
+        dry_run_preview "Would run: systemctl --user daemon-reload"
+        dry_run_preview "Would run: systemctl --user enable hyprlock.service"
+        return 0
+    fi
+
+    # Check source file exists
+    if [[ ! -f "$HYPRLOCK_SERVICE_SRC" ]]; then
+        error "Source file not found: $HYPRLOCK_SERVICE_SRC"
+        return 1
+    fi
+
+    mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
+    cp "$HYPRLOCK_SERVICE_SRC" "$HYPRLOCK_SERVICE_DEST" || { error "Failed to copy hyprlock service"; return 1; }
+
+    # Ensure file is readable by systemd (user-readable)
+    chmod 644 "$HYPRLOCK_SERVICE_DEST" || { error "Failed to set permissions on service file"; return 1; }
+
+    # Verify file is readable before proceeding
+    if [[ ! -r "$HYPRLOCK_SERVICE_DEST" ]]; then
+        error "Service file not readable: $HYPRLOCK_SERVICE_DEST"
+        return 1
+    fi
+
+    # Reload and enable
+    systemctl --user daemon-reload || { error "Failed to reload user systemd"; return 1; }
+
+    # Verify service is loadable before enabling
+    if ! systemctl --user cat hyprlock.service >/dev/null 2>&1; then
+        error "Systemd cannot load hyprlock.service - check file format"
+        return 1
+    fi
+
+    systemctl --user enable hyprlock.service || { error "Failed to enable hyprlock service"; return 1; }
+
+    success "Hyprlock service installed and enabled: $HYPRLOCK_SERVICE_DEST"
+}
+
+# Remove hyprlock systemd service (for uninstall)
+remove_hyprlock_service() {
+    if [[ ! -f "$HYPRLOCK_SERVICE_DEST" ]]; then
+        return 0
+    fi
+
+    if dry_run_preview "Would disable and remove: $HYPRLOCK_SERVICE_DEST"; then
+        return 0
+    fi
+
+    # Disable first, then remove
+    systemctl --user disable hyprlock.service 2>/dev/null || true
+    rm -f "$HYPRLOCK_SERVICE_DEST"
+    systemctl --user daemon-reload
+
+    success "Removed hyprlock systemd service"
+}
+
+# Show instructions for hyprlock setup based on session method
+# For exec-once: Guide user to add exec-once = hyprlock to config
+# For UWSM: Service is already installed, just confirm
 show_execs_instructions() {
+    # UWSM method: Service is already enabled, no manual config needed
+    if [[ "$SESSION_METHOD" == "uwsm" ]]; then
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo -e "  ${GREEN}${BOLD}✓ HYPRLOCK SERVICE CONFIGURED${NC}"
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "  The hyprlock systemd service has been installed and enabled."
+        echo "  It will start automatically when your graphical session begins."
+        echo ""
+        echo -e "  ${CYAN}Service location:${NC} $HYPRLOCK_SERVICE_DEST"
+        echo ""
+        echo "  To check status:  systemctl --user status hyprlock.service"
+        echo "  To disable:       systemctl --user disable hyprlock.service"
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+        read -p "Press Enter to continue..."
+        return
+    fi
+
+    # exec-once method: Guide user to add line to config
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${BOLD}MANUAL STEP REQUIRED: Add hyprlock to your config${NC}"
@@ -634,7 +876,8 @@ show_execs_instructions() {
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
 
-    if [[ -n "${EDITOR:-}" ]] && ask "Open your config in \$EDITOR ($EDITOR)?"; then
+    # Only offer EDITOR if it's set AND executable
+    if [[ -n "${EDITOR:-}" ]] && command -v "$EDITOR" >/dev/null 2>&1 && ask "Open your config in \$EDITOR ($EDITOR)?"; then
         if [[ ${#DETECTED_EXECS_FILES[@]} -eq 1 ]]; then
             "$EDITOR" "${DETECTED_EXECS_FILES[0]}"
         elif [[ ${#DETECTED_EXECS_FILES[@]} -gt 1 ]]; then
@@ -899,6 +1142,9 @@ uninstall() {
     remove_if_exists "$LAUNCHER_DEST" "Launcher script"
     remove_if_exists "$FISH_HOOK_DEST" "Fish hook"
 
+    # Remove hyprlock systemd service (if installed for UWSM)
+    remove_hyprlock_service
+
     # Remove systemd override (requires sudo)
     if [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]; then
         if ask_yes "Remove systemd autologin override? (requires sudo)"; then
@@ -914,7 +1160,7 @@ uninstall() {
 
     echo ""
     echo -e "  ${YELLOW}Remaining manual steps:${NC}"
-    echo "    1. Remove 'exec-once = hyprlock' from your execs.conf"
+    echo "    1. Remove 'exec-once = hyprlock' from your execs.conf (if used)"
     echo -e "    2. Re-enable SDDM: ${CYAN}sudo systemctl enable sddm${NC}"
     echo "    3. Reboot"
     echo ""
@@ -1046,6 +1292,7 @@ install() {
     present_gpu_options
     present_display_options
     present_config_info
+    present_session_method
     show_detection_summary
 
     # Phase 2: User-level installation
@@ -1054,7 +1301,12 @@ install() {
     install_launcher_script
     install_fish_hook
 
-    # Show execs.conf instructions (never auto-modify)
+    # Install hyprlock service for UWSM users
+    if [[ "$SESSION_METHOD" == "uwsm" ]]; then
+        install_hyprlock_service
+    fi
+
+    # Show hyprlock setup instructions (conditional on session method)
     show_execs_instructions
 
     # Phase 3: System-level installation
