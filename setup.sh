@@ -325,6 +325,15 @@ remove_if_exists() {
     fi
 }
 
+# Safely remove symlink at destination (TOCTOU mitigation before atomic move)
+remove_symlink_if_exists() {
+    local path="$1"
+    [[ -L "$path" ]] || return 0
+
+    warn "Removing existing symlink at destination: $path"
+    rm -f "$path" || { error "Failed to remove symlink at: $path"; return 1; }
+}
+
 # ============================================================================
 # SECTION 9: Installation Detection
 # ============================================================================
@@ -1045,10 +1054,7 @@ set -gx HYPR_DRM_PATH \"$escaped_drm_path\"\\
     chmod +x "$temp_file" || { error "Failed to make script executable"; return 1; }
 
     # Security: Check for symlink at destination (TOCTOU mitigation)
-    if [[ -L "$LAUNCHER_DEST" ]]; then
-        warn "Removing existing symlink at destination: $LAUNCHER_DEST"
-        rm -f "$LAUNCHER_DEST" || { error "Failed to remove symlink"; return 1; }
-    fi
+    remove_symlink_if_exists "$LAUNCHER_DEST" || return 1
 
     # Atomic move: only replace destination if all above succeeded
     mv "$temp_file" "$LAUNCHER_DEST" || { error "Failed to install launcher script"; return 1; }
@@ -1074,10 +1080,7 @@ install_fish_hook() {
     cp "$FISH_HOOK_SRC" "$temp_file" || { error "Failed to copy fish hook"; return 1; }
 
     # Security: Check for symlink at destination (TOCTOU mitigation)
-    if [[ -L "$FISH_HOOK_DEST" ]]; then
-        warn "Removing existing symlink at destination: $FISH_HOOK_DEST"
-        rm -f "$FISH_HOOK_DEST" || { error "Failed to remove symlink"; return 1; }
-    fi
+    remove_symlink_if_exists "$FISH_HOOK_DEST" || return 1
 
     # Atomic move: only replace destination if copy succeeded
     mv "$temp_file" "$FISH_HOOK_DEST" || { error "Failed to install fish hook"; return 1; }
@@ -1147,80 +1150,83 @@ remove_hyprlock_service() {
     success "Removed hyprlock systemd service"
 }
 
-# Show instructions for hyprlock setup based on session method
-# For exec-once: Guide user to add exec-once = hyprlock to config
-# For UWSM: Service is already installed, just confirm
-show_execs_instructions() {
-    # UWSM method: Service is already enabled, no manual config needed
-    if [[ "$SESSION_METHOD" == "uwsm" ]]; then
-        echo ""
-        echo "═══════════════════════════════════════════════════════════════════"
-        echo -e "  ${GREEN}${BOLD}✓ HYPRLOCK SERVICE CONFIGURED${NC}"
-        echo "═══════════════════════════════════════════════════════════════════"
-        echo ""
-        echo "  The hyprlock systemd service has been installed and enabled."
-        echo "  It will start automatically when your graphical session begins."
-        echo ""
-        echo -e "  ${CYAN}Service location:${NC} $HYPRLOCK_SERVICE_DEST"
-        echo ""
-        echo "  To check status:  systemctl --user status hyprlock.service"
-        echo "  To disable:       systemctl --user disable hyprlock.service"
-        echo ""
-        echo "═══════════════════════════════════════════════════════════════════"
+# Show UWSM service confirmation (when using systemd service method)
+show_uwsm_service_configured() {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "  ${GREEN}${BOLD}[OK] HYPRLOCK SERVICE CONFIGURED${NC}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  The hyprlock systemd service has been installed and enabled."
+    echo "  It will start automatically when your graphical session begins."
+    echo ""
+    echo -e "  ${CYAN}Service location:${NC} $HYPRLOCK_SERVICE_DEST"
+    echo ""
+    echo "  To check status:  systemctl --user status hyprlock.service"
+    echo "  To disable:       systemctl --user disable hyprlock.service"
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    read -p "Press Enter to continue..."
+}
+
+# Warn about hybrid configuration (exec-once + UWSM service both present)
+# Returns: 0 to continue, 1 to skip configuration
+check_hybrid_configuration() {
+    is_hyprlock_service_installed || return 0
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "  ${RED}${BOLD}[!] HYBRID CONFIGURATION DETECTED${NC}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  A hyprlock systemd service is already installed (UWSM method)."
+    echo "  Adding exec-once = hyprlock would create a HYBRID configuration"
+    echo "  where hyprlock starts TWICE - this will cause problems!"
+    echo ""
+    echo "  Options:"
+    echo "    1) Remove the service first: systemctl --user disable hyprlock.service"
+    echo "    2) Or switch to UWSM method: re-run installer and choose option 2"
+    echo ""
+    if ! ask "Continue anyway? (NOT RECOMMENDED)"; then
+        info "Skipping hyprlock configuration to prevent hybrid setup"
         echo ""
         read -p "Press Enter to continue..."
-        return
+        return 1
     fi
+    warn "Proceeding with hybrid configuration - you may experience issues"
+    return 0
+}
 
-    # exec-once method: Guide user to add line to config
+# Check if hyprlock is already configured in execs files
+# Returns: 0 to continue, 1 to skip configuration
+check_existing_hyprlock_config() {
+    [[ ${#HYPRLOCK_CONFIGURED_FILES[@]} -gt 0 ]] || return 0
 
-    # Prevent hybrid configuration: warn if UWSM service already exists
-    if is_hyprlock_service_installed; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "  ${YELLOW}${BOLD}[!] HYPRLOCK ALREADY CONFIGURED${NC}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Found existing hyprlock configuration in:"
+    for file in "${HYPRLOCK_CONFIGURED_FILES[@]}"; do
+        local rel_path="${file#$HOME/}"
+        echo "      • ~/$rel_path"
+    done
+    echo ""
+
+    if ! ask "Add hyprlock to config anyway? (creates duplicate)"; then
+        success "Skipping hyprlock configuration (already present)"
         echo ""
-        echo "═══════════════════════════════════════════════════════════════════"
-        echo -e "  ${RED}${BOLD}⚠️  HYBRID CONFIGURATION DETECTED${NC}"
-        echo "═══════════════════════════════════════════════════════════════════"
-        echo ""
-        echo "  A hyprlock systemd service is already installed (UWSM method)."
-        echo "  Adding exec-once = hyprlock would create a HYBRID configuration"
-        echo "  where hyprlock starts TWICE - this will cause problems!"
-        echo ""
-        echo "  Options:"
-        echo "    1) Remove the service first: systemctl --user disable hyprlock.service"
-        echo "    2) Or switch to UWSM method: re-run installer and choose option 2"
-        echo ""
-        if ! ask "Continue anyway? (NOT RECOMMENDED)"; then
-            info "Skipping hyprlock configuration to prevent hybrid setup"
-            echo ""
-            read -p "Press Enter to continue..."
-            return
-        fi
-        warn "Proceeding with hybrid configuration - you may experience issues"
+        read -p "Press Enter to continue..."
+        return 1
     fi
+    warn "Proceeding - you may have duplicate hyprlock entries"
+    return 0
+}
 
-    # Check if already configured and offer to skip
-    if [[ ${#HYPRLOCK_CONFIGURED_FILES[@]} -gt 0 ]]; then
-        echo ""
-        echo "═══════════════════════════════════════════════════════════════════"
-        echo -e "  ${YELLOW}${BOLD}⚠️  HYPRLOCK ALREADY CONFIGURED${NC}"
-        echo "═══════════════════════════════════════════════════════════════════"
-        echo ""
-        echo "  Found existing hyprlock configuration in:"
-        for file in "${HYPRLOCK_CONFIGURED_FILES[@]}"; do
-            local rel_path="${file#$HOME/}"
-            echo "      • ~/$rel_path"
-        done
-        echo ""
-
-        if ! ask "Add hyprlock to config anyway? (creates duplicate)"; then
-            success "Skipping hyprlock configuration (already present)"
-            echo ""
-            read -p "Press Enter to continue..."
-            return
-        fi
-        warn "Proceeding - you may have duplicate hyprlock entries"
-    fi
-
+# Show manual exec-once instructions and offer editor
+show_execonce_manual_instructions() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${BOLD}MANUAL STEP REQUIRED: Add hyprlock to your config${NC}"
@@ -1262,6 +1268,23 @@ show_execs_instructions() {
 
     echo ""
     read -p "Press Enter when you've added the line..."
+}
+
+# Show instructions for hyprlock setup based on session method
+# For exec-once: Guide user to add exec-once = hyprlock to config
+# For UWSM: Service is already installed, just confirm
+show_execs_instructions() {
+    # UWSM method: Service is already enabled, no manual config needed
+    if [[ "$SESSION_METHOD" == "uwsm" ]]; then
+        show_uwsm_service_configured
+        return
+    fi
+
+    # exec-once method: Guide user to add line to config
+    # Check for hybrid configuration and existing config, then show instructions
+    check_hybrid_configuration || return
+    check_existing_hyprlock_config || return
+    show_execonce_manual_instructions
 }
 
 # ============================================================================
@@ -1503,7 +1526,7 @@ show_final_instructions() {
     echo ""
 
     if ask_yes "Reboot now?"; then
-        sudo reboot || {
+        sudo timeout 30 reboot || {
             error "Reboot command failed"
             echo "  Run manually: sudo reboot"
         }
@@ -1611,7 +1634,7 @@ uninstall() {
     success "Uninstall complete"
 
     if ask_yes "Reboot now?"; then
-        sudo reboot || {
+        sudo timeout 30 reboot || {
             error "Reboot command failed"
             echo "  Run manually: sudo reboot"
         }
