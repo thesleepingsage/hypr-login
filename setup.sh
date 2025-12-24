@@ -241,7 +241,8 @@ backup_file() {
         if dry_run_preview "Would backup: $file → $backup"; then
             return 0
         fi
-        cp "$file" "$backup"
+        # Use -p to preserve permissions (important for executables)
+        cp -p "$file" "$backup" || { error "Failed to backup: $file"; return 1; }
         info "Backup created: $backup"
     fi
 }
@@ -322,6 +323,9 @@ EOF
         error "Config file is empty or missing after write"
         return 1
     fi
+
+    # Restrict permissions - config contains system info
+    chmod 600 "$CONFIG_FILE" || { error "Failed to set config file permissions"; return 1; }
 
     success "Saved installation config to $CONFIG_FILE"
 }
@@ -881,7 +885,18 @@ install_fish_hook() {
     fi
 
     mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
-    cp "$FISH_HOOK_SRC" "$FISH_HOOK_DEST" || { error "Failed to copy fish hook"; return 1; }
+
+    # Use temp file for atomic installation
+    local temp_file
+    temp_file=$(mktemp) || { error "Failed to create temp file"; return 1; }
+    trap "rm -f '$temp_file'" RETURN
+
+    cp "$FISH_HOOK_SRC" "$temp_file" || { error "Failed to copy fish hook"; return 1; }
+
+    # Atomic move: only replace destination if copy succeeded
+    mv "$temp_file" "$FISH_HOOK_DEST" || { error "Failed to install fish hook"; return 1; }
+    trap - RETURN  # Clear trap since move succeeded
+
     success "Fish hook installed: $FISH_HOOK_DEST"
 }
 
@@ -1078,10 +1093,17 @@ create_autologin_override() {
 
     sudo mkdir -p "$SYSTEMD_OVERRIDE_DIR" || { error "Failed to create systemd override directory"; return 1; }
 
+    # Backup existing override file before modification
+    if [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]; then
+        local backup_file="${SYSTEMD_OVERRIDE_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+        sudo cp -p "$SYSTEMD_OVERRIDE_FILE" "$backup_file" || warn "Failed to backup existing override file"
+        info "Backed up existing config to: $backup_file"
+    fi
+
     cat << EOF | sudo tee "$SYSTEMD_OVERRIDE_FILE" > /dev/null || { error "Failed to write autologin config"; return 1; }
 [Service]
 ExecStart=
-ExecStart=-/usr/bin/agetty -o "-p -f -- \\u" --noclear --autologin $DETECTED_USERNAME %I \$TERM
+ExecStart=-/usr/bin/agetty -o "-p -f -- \\u" --noclear --autologin "$DETECTED_USERNAME" %I \$TERM
 EOF
 
     sudo systemctl daemon-reload || { error "Failed to reload systemd daemon"; return 1; }
@@ -1486,12 +1508,12 @@ install() {
     # Phase 2: User-level installation
     echo ""
     info "Installing user-level components..."
-    install_launcher_script
-    install_fish_hook
+    install_launcher_script || { error "Launcher script installation failed - aborting"; exit 1; }
+    install_fish_hook || { error "Fish hook installation failed - aborting"; exit 1; }
 
     # Install hyprlock service for UWSM users
     if [[ "$SESSION_METHOD" == "uwsm" ]]; then
-        install_hyprlock_service
+        install_hyprlock_service || { error "Hyprlock service installation failed - aborting"; exit 1; }
     fi
 
     # Show hyprlock setup instructions (conditional on session method)
