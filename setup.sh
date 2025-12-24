@@ -77,7 +77,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCHER_DEST="$HOME/.config/hypr/scripts/hyprland-tty.fish"
 FISH_HOOK_DEST="$HOME/.config/fish/conf.d/hyprland-autostart.fish"
 SYSTEMD_OVERRIDE_DIR="/etc/systemd/system/getty@tty1.service.d"
-SYSTEMD_OVERRIDE_FILE="$SYSTEMD_OVERRIDE_DIR/autologin.conf"
+SYSTEMD_OVERRIDE_DEST="$SYSTEMD_OVERRIDE_DIR/autologin.conf"
 CONFIG_DIR="$HOME/.config/hypr-login"
 CONFIG_FILE="$CONFIG_DIR/install.conf"
 
@@ -184,6 +184,43 @@ info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Safe systemctl wrapper with timeout and consistent error handling
+# Usage: systemctl_safe [--user] [--sudo] [--quiet] [--timeout=N] <action> [unit]
+# Returns: 0 on success, 1 on failure/timeout
+# Examples:
+#   systemctl_safe --user daemon-reload
+#   systemctl_safe --sudo disable sddm
+#   systemctl_safe --user --quiet is-active hyprlock.service
+systemctl_safe() {
+    local use_user=false use_sudo=false quiet=false timeout_sec=5
+    local args=()
+
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user)      use_user=true; shift ;;
+            --sudo)      use_sudo=true; shift ;;
+            --quiet)     quiet=true; shift ;;
+            --timeout=*) timeout_sec="${1#--timeout=}"; shift ;;
+            *)           args+=("$1"); shift ;;
+        esac
+    done
+
+    # Build command
+    local cmd=()
+    $use_sudo && cmd+=(sudo)
+    cmd+=(timeout "$timeout_sec" systemctl)
+    $use_user && cmd+=(--user)
+    cmd+=("${args[@]}")
+
+    # Execute with appropriate output handling
+    if $quiet; then
+        "${cmd[@]}" >/dev/null 2>&1
+    else
+        "${cmd[@]}"
+    fi
+}
 
 dry_run_prefix() {
     if $DRY_RUN; then
@@ -348,13 +385,13 @@ is_fish_hook_installed() {
 
 is_systemd_configured() {
     # Check file exists and is not empty
-    [[ -s "$SYSTEMD_OVERRIDE_FILE" ]] || return 1
+    [[ -s "$SYSTEMD_OVERRIDE_DEST" ]] || return 1
 
     # Validate it contains the autologin flag (core functionality)
-    grep -q -- '--autologin' "$SYSTEMD_OVERRIDE_FILE" || return 1
+    grep -q -- '--autologin' "$SYSTEMD_OVERRIDE_DEST" || return 1
 
     # Ensure placeholder was replaced (not still "YOUR_USERNAME")
-    ! grep -q 'YOUR_USERNAME' "$SYSTEMD_OVERRIDE_FILE"
+    ! grep -q 'YOUR_USERNAME' "$SYSTEMD_OVERRIDE_DEST"
 }
 
 is_hyprlock_service_installed() {
@@ -370,8 +407,7 @@ is_fully_installed() {
 }
 
 is_sddm_enabled() {
-    # Use timeout to prevent hanging if systemd is unresponsive
-    timeout 3 systemctl is-enabled sddm &>/dev/null
+    systemctl_safe --timeout=3 --quiet is-enabled sddm
 }
 
 # Save installation configuration for future updates
@@ -433,10 +469,10 @@ load_install_config() {
 }
 
 # ============================================================================
-# SECTION 10: Dependency Checking
+# SECTION 10: Pre-flight Validation
 # ============================================================================
 
-check_dependencies() {
+validate_dependencies() {
     local missing=()
 
     command -v fish &>/dev/null || missing+=("fish")
@@ -454,7 +490,7 @@ check_dependencies() {
     success "All dependencies found (fish, Hyprland, hyprlock)"
 }
 
-check_source_files() {
+validate_source_files() {
     # Check launcher script
     if [[ ! -f "$LAUNCHER_SRC" ]]; then
         error "Source file not found: $LAUNCHER_SRC"
@@ -790,8 +826,7 @@ present_config_info() {
 # Uses timeout to prevent hanging if systemd is unresponsive
 check_uwsm_status() {
     local status
-    # 3-second timeout prevents indefinite hang
-    status=$(timeout 3 systemctl --user is-active uwsm-app@Hyprland.service 2>&1) || status="timeout"
+    status=$(systemctl_safe --user --timeout=3 is-active uwsm-app@Hyprland.service 2>&1) || status="timeout"
 
     case "$status" in
         active)
@@ -812,43 +847,72 @@ check_uwsm_status() {
 }
 
 # Present session method selection (UWSM vs exec-once)
+# Auto-detects first, falls back to manual selection if ambiguous
 # Sets: SESSION_METHOD to "exec-once" or "uwsm"
 present_session_method() {
-    # Generous limit - user may need multiple attempts to understand
-    local max_help_attempts=10
-    local help_attempts=0
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "  ${BOLD}SESSION METHOD DETECTION${NC}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
 
-    echo ""
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo -e "  ${BOLD}SESSION METHOD: How do you start Hyprland?${NC}"
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo ""
-    echo -e "  ${YELLOW}⚠️  Choosing the wrong method will prevent hyprlock from starting!${NC}"
-    echo ""
-    echo -e "  ${CYAN}WHAT IS UWSM?${NC}"
-    echo "    UWSM (Universal Wayland Session Manager) runs Hyprland via systemd."
-    echo "    If you run 'uwsm start hyprland' or use a UWSM display manager, choose 2."
-    echo ""
-    echo -e "  ${CYAN}WHAT IS EXEC-ONCE?${NC}"
-    echo "    This is the traditional method where Hyprland starts from ~/.config/hypr/"
-    echo "    If you log into TTY and Hyprland auto-starts, choose 1."
+    # Try auto-detection first
+    info "Detecting session method..."
+    local uwsm_status
+    uwsm_status=$(check_uwsm_status)
+
+    case "$uwsm_status" in
+        active)
+            echo ""
+            echo -e "  ${GREEN}Detected: UWSM is active${NC}"
+            echo "  Hyprland is running as a systemd user service."
+            echo ""
+            if ask_yes "Use UWSM method? (hyprlock as systemd service)"; then
+                SESSION_METHOD="uwsm"
+                success "Session method: uwsm"
+                return 0
+            fi
+            # User declined auto-detection, fall through to manual selection
+            ;;
+        inactive|not-found)
+            echo ""
+            if [[ "$uwsm_status" == "inactive" ]]; then
+                echo -e "  ${CYAN}Detected: UWSM service exists but is inactive${NC}"
+            else
+                echo -e "  ${CYAN}Detected: UWSM not installed or not configured${NC}"
+            fi
+            echo "  Hyprland appears to start from your shell/TTY."
+            echo ""
+            if ask_yes "Use exec-once method? (hyprlock in Hyprland config)"; then
+                SESSION_METHOD="exec-once"
+                success "Session method: exec-once"
+                return 0
+            fi
+            # User declined auto-detection, fall through to manual selection
+            ;;
+        failed)
+            echo ""
+            echo -e "  ${YELLOW}Detected: UWSM service is in failed state${NC}"
+            echo "  Cannot reliably auto-detect. Please choose manually."
+            echo ""
+            ;;
+    esac
+
+    # Manual selection (only reached if auto-detect was declined or failed)
     echo ""
     echo "  ─────────────────────────────────────────────────────────────────"
+    echo -e "  ${BOLD}Manual Selection${NC}"
+    echo "  ─────────────────────────────────────────────────────────────────"
+    echo ""
+    echo -e "  ${CYAN}UWSM${NC}: Hyprland runs via systemd (uwsm start hyprland)"
+    echo -e "  ${CYAN}exec-once${NC}: Hyprland starts from TTY/shell config"
     echo ""
     echo "    1) Direct/TTY autologin (exec-once method)"
-    echo "       • You log into a TTY and Hyprland starts automatically"
-    echo "       • Your startup is configured in ~/.config/hypr/execs.conf"
-    echo ""
     echo "    2) UWSM managed session (systemd service method)"
-    echo "       • You use 'uwsm start hyprland' or SDDM/GDM with UWSM"
-    echo "       • Hyprland runs as a systemd user service"
-    echo ""
-    echo "    3) I don't know / Not sure"
-    echo "       • Let the installer detect your current setup"
     echo ""
 
     while true; do
-        echo -n "  Choose [1-3]: "
+        echo -n "  Choose [1-2]: "
         read -r method_choice
 
         case "$method_choice" in
@@ -862,108 +926,11 @@ present_session_method() {
                 success "Session method: UWSM (hyprlock as systemd service)"
                 return 0
                 ;;
-            3)
-                ((help_attempts++))
-                if ((help_attempts >= max_help_attempts)); then
-                    echo ""
-                    error "Maximum help attempts reached ($max_help_attempts)"
-                    echo "  Please determine your session method and re-run the installer."
-                    echo "  Hint: Run 'systemctl --user is-active uwsm-app@Hyprland.service'"
-                    echo ""
-                    exit 1
-                fi
-
-                present_session_method_help
-                # If help flow auto-detected and set SESSION_METHOD, we're done
-                if [[ -n "$SESSION_METHOD" ]]; then
-                    return 0
-                fi
-                # Otherwise, loop back to main selection
-                echo ""
-                echo "    1) Direct/TTY autologin (exec-once method)"
-                echo "    2) UWSM managed session (systemd service method)"
-                echo "    3) I don't know / Not sure"
-                echo ""
-                ;;
             *)
-                warn "Invalid choice. Please enter 1, 2, or 3."
+                warn "Invalid choice. Please enter 1 or 2."
                 ;;
         esac
     done
-}
-
-# Help flow for users who don't know their session method
-present_session_method_help() {
-    echo ""
-    echo "  Would you like us to check your system?"
-    echo ""
-    echo "    1) Yes, check my system"
-    echo "    2) No, I'll figure it out myself"
-    echo ""
-    echo -n "  Choose [1-2]: "
-    read -r help_choice
-
-    case "$help_choice" in
-        1)
-            echo ""
-            info "Checking for UWSM..."
-            local uwsm_status
-            uwsm_status=$(check_uwsm_status)
-
-            case "$uwsm_status" in
-                active)
-                    echo ""
-                    echo -e "  ${GREEN}Result: UWSM is active${NC}"
-                    echo "  → Auto-selecting UWSM method..."
-                    SESSION_METHOD="uwsm"
-                    success "Session method: uwsm (auto-detected)"
-                    return 0  # Exit help flow with method set
-                    ;;
-                inactive|not-found)
-                    echo ""
-                    if [[ "$uwsm_status" == "inactive" ]]; then
-                        echo -e "  ${CYAN}Result: UWSM service exists but is inactive${NC}"
-                    else
-                        echo -e "  ${CYAN}Result: UWSM not installed or not configured${NC}"
-                    fi
-                    echo "  → Auto-selecting exec-once method..."
-                    SESSION_METHOD="exec-once"
-                    success "Session method: exec-once (auto-detected)"
-                    return 0  # Exit help flow with method set
-                    ;;
-                failed)
-                    echo ""
-                    echo -e "  ${YELLOW}Result: UWSM service exists but is in failed state${NC}"
-                    echo "  → Cannot auto-detect. Please select manually."
-                    ;;
-            esac
-            echo ""
-            read -p "  Press Enter to continue..."
-            ;;
-        2)
-            echo ""
-            echo "  To figure out which method you use:"
-            echo ""
-            echo "    • If you installed via this project's TTY autologin → Option 1"
-            echo "    • If you run 'uwsm start hyprland' → Option 2"
-            echo "    • If you use a display manager with UWSM → Option 2"
-            echo "    • If Hyprland starts from your .bashrc/.zshrc/.config/fish → Option 1"
-            echo ""
-            echo "  Re-run the installer when you know your setup."
-            echo ""
-            if ! ask "Continue anyway?"; then
-                info "Installation cancelled"
-                exit 0
-            fi
-            # User chose to continue without knowing - they must still select a method
-            return 1
-            ;;
-        *)
-            warn "Invalid choice"
-            return 1
-            ;;
-    esac
-    return 0
 }
 
 show_detection_summary() {
@@ -1119,15 +1086,15 @@ install_hyprlock_service() {
     fi
 
     # Reload and enable (with timeouts to prevent hang)
-    timeout 5 systemctl --user daemon-reload || { error "Failed to reload user systemd (timeout)"; return 1; }
+    systemctl_safe --user daemon-reload || { error "Failed to reload user systemd (timeout)"; return 1; }
 
     # Verify service is loadable before enabling
-    if ! timeout 3 systemctl --user cat hyprlock.service >/dev/null 2>&1; then
+    if ! systemctl_safe --user --timeout=3 --quiet cat hyprlock.service; then
         error "Systemd cannot load hyprlock.service - check file format"
         return 1
     fi
 
-    timeout 5 systemctl --user enable hyprlock.service || { error "Failed to enable hyprlock service (timeout)"; return 1; }
+    systemctl_safe --user enable hyprlock.service || { error "Failed to enable hyprlock service (timeout)"; return 1; }
 
     success "Hyprlock service installed and enabled: $HYPRLOCK_SERVICE_DEST"
 }
@@ -1143,9 +1110,9 @@ remove_hyprlock_service() {
     fi
 
     # Disable first, then remove (with timeouts)
-    timeout 5 systemctl --user disable hyprlock.service 2>/dev/null || true
+    systemctl_safe --user --quiet disable hyprlock.service || true
     rm -f "$HYPRLOCK_SERVICE_DEST" || { warn "Could not remove service file"; }
-    timeout 5 systemctl --user daemon-reload || { warn "Failed to reload user systemd"; }
+    systemctl_safe --user daemon-reload || { warn "Failed to reload user systemd"; }
 
     success "Removed hyprlock systemd service"
 }
@@ -1305,7 +1272,7 @@ request_sudo() {
     if ! ask_yes "Proceed with sudo operations?"; then
         warn "Skipping system-level configuration"
         echo ""
-        echo "  You'll need to manually create: $SYSTEMD_OVERRIDE_FILE"
+        echo "  You'll need to manually create: $SYSTEMD_OVERRIDE_DEST"
         echo "  And run: sudo systemctl daemon-reload"
         return 1
     fi
@@ -1320,30 +1287,30 @@ request_sudo() {
 }
 
 create_autologin_override() {
-    if dry_run_preview "Would create: $SYSTEMD_OVERRIDE_FILE"; then
+    if dry_run_preview "Would create: $SYSTEMD_OVERRIDE_DEST"; then
         return 0
     fi
 
     sudo mkdir -p "$SYSTEMD_OVERRIDE_DIR" || { error "Failed to create systemd override directory"; return 1; }
 
     # Backup existing override file before modification
-    if [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]; then
-        local backup_file="${SYSTEMD_OVERRIDE_FILE}.backup.$(date +%Y%m%d_%H%M%S_%N)"
-        sudo cp -p "$SYSTEMD_OVERRIDE_FILE" "$backup_file" || warn "Failed to backup existing override file"
+    if [[ -f "$SYSTEMD_OVERRIDE_DEST" ]]; then
+        local backup_file="${SYSTEMD_OVERRIDE_DEST}.backup.$(date +%Y%m%d_%H%M%S_%N)"
+        sudo cp -p "$SYSTEMD_OVERRIDE_DEST" "$backup_file" || warn "Failed to backup existing override file"
         info "Backed up existing config to: $backup_file"
     fi
 
-    cat << EOF | sudo tee "$SYSTEMD_OVERRIDE_FILE" > /dev/null || { error "Failed to write autologin config"; return 1; }
+    cat << EOF | sudo tee "$SYSTEMD_OVERRIDE_DEST" > /dev/null || { error "Failed to write autologin config"; return 1; }
 [Service]
 ExecStart=
 ExecStart=-/usr/bin/agetty -o "-p -f -- \\u" --noclear --autologin "$DETECTED_USERNAME" %I \$TERM
 EOF
 
     # Use timeout to prevent hang if systemd is unresponsive
-    sudo timeout 5 systemctl daemon-reload || { error "Failed to reload systemd daemon (timeout)"; return 1; }
+    systemctl_safe --sudo daemon-reload || { error "Failed to reload systemd daemon (timeout)"; return 1; }
 
     # Validate the systemd config can be parsed (catches syntax errors early)
-    if ! sudo timeout 3 systemctl cat getty@tty1.service >/dev/null 2>&1; then
+    if ! systemctl_safe --sudo --timeout=3 --quiet cat getty@tty1.service; then
         warn "Systemd may have issues parsing getty@tty1 config - check manually"
     fi
 
@@ -1496,7 +1463,7 @@ disable_sddm() {
     fi
 
     if is_sddm_enabled; then
-        sudo timeout 5 systemctl disable sddm || { error "Failed to disable SDDM (timeout)"; return 1; }
+        systemctl_safe --sudo disable sddm || { error "Failed to disable SDDM (timeout)"; return 1; }
         success "SDDM disabled"
     else
         info "SDDM was already disabled"
@@ -1522,7 +1489,7 @@ show_final_instructions() {
     echo -e "  ${YELLOW}Files installed:${NC}"
     echo "    • $LAUNCHER_DEST"
     echo "    • $FISH_HOOK_DEST"
-    echo "    • $SYSTEMD_OVERRIDE_FILE"
+    echo "    • $SYSTEMD_OVERRIDE_DEST"
     echo ""
 
     if ask_yes "Reboot now?"; then
@@ -1598,13 +1565,13 @@ uninstall() {
     fi
 
     # Remove systemd override (requires sudo)
-    if [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]; then
+    if [[ -f "$SYSTEMD_OVERRIDE_DEST" ]]; then
         if ask_yes "Remove systemd autologin override? (requires sudo)"; then
             if $DRY_RUN; then
-                echo "$(dry_run_prefix)Would remove: $SYSTEMD_OVERRIDE_FILE"
+                echo "$(dry_run_prefix)Would remove: $SYSTEMD_OVERRIDE_DEST"
             else
-                sudo rm -f "$SYSTEMD_OVERRIDE_FILE"
-                sudo timeout 5 systemctl daemon-reload || warn "Systemd reload timed out"
+                sudo rm -f "$SYSTEMD_OVERRIDE_DEST"
+                systemctl_safe --sudo daemon-reload || warn "Systemd reload timed out"
                 success "Removed systemd override"
             fi
         fi
@@ -1625,7 +1592,7 @@ uninstall() {
         if $DRY_RUN; then
             echo "$(dry_run_prefix)Would run: sudo systemctl enable sddm"
         else
-            sudo timeout 5 systemctl enable sddm || { error "Failed to enable SDDM (timeout)"; }
+            systemctl_safe --sudo enable sddm || { error "Failed to enable SDDM (timeout)"; }
             success "SDDM re-enabled"
         fi
     fi
@@ -1665,7 +1632,7 @@ update() {
         info "No saved configuration found"
     fi
 
-    check_source_files
+    validate_source_files
 
     # Backup and update launcher
     if is_launcher_installed; then
@@ -1754,8 +1721,8 @@ install() {
     # Pre-flight checks
     echo ""
     info "Running pre-flight checks..."
-    check_dependencies
-    check_source_files
+    validate_dependencies
+    validate_source_files
 
     if is_fully_installed; then
         warn "hypr-login appears to be already installed"
@@ -1827,7 +1794,7 @@ install() {
         echo ""
         echo "  User-level components are installed."
         echo "  To complete installation manually:"
-        echo "    1. Create $SYSTEMD_OVERRIDE_FILE"
+        echo "    1. Create $SYSTEMD_OVERRIDE_DEST"
         echo "    2. Run: sudo systemctl daemon-reload"
         echo "    3. Test on tty2"
         echo "    4. Disable SDDM: sudo systemctl disable sddm"
