@@ -115,6 +115,35 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # ============================================================================
+# SECTION 3b: Interrupt Handling
+# ============================================================================
+
+# Track if we're in the middle of a critical operation
+CRITICAL_OPERATION=""
+
+cleanup_on_interrupt() {
+    local exit_code=$?
+    echo ""
+    echo -e "${RED}[INTERRUPTED]${NC} Script was interrupted"
+
+    if [[ -n "$CRITICAL_OPERATION" ]]; then
+        echo -e "${YELLOW}[WARN]${NC} Interrupted during: $CRITICAL_OPERATION"
+        echo ""
+        echo "  The installation may be in a partial state."
+        echo "  To clean up, run: ./setup.sh -u"
+        echo "  To retry, run: ./setup.sh"
+    fi
+
+    # Clean up any temp files that might exist
+    rm -f /tmp/hypr-login-*.tmp 2>/dev/null || true
+
+    exit $exit_code
+}
+
+# Set up trap for common interrupt signals
+trap cleanup_on_interrupt INT TERM
+
+# ============================================================================
 # SECTION 4: Helper Functions
 # ============================================================================
 
@@ -235,7 +264,8 @@ normalize_path() {
 # Create timestamped backup
 backup_file() {
     local file="$1"
-    local backup="${file}.backup.$(date +%Y%m%d_%H%M%S)"
+    # Use nanoseconds to prevent timestamp collision on rapid calls
+    local backup="${file}.backup.$(date +%Y%m%d_%H%M%S_%N)"
 
     if [[ -f "$file" ]]; then
         if dry_run_preview "Would backup: $file → $backup"; then
@@ -363,18 +393,36 @@ check_dependencies() {
 }
 
 check_source_files() {
+    # Check launcher script
     if [[ ! -f "$LAUNCHER_SRC" ]]; then
         error "Source file not found: $LAUNCHER_SRC"
         echo "  Make sure you're running from the hypr-login directory"
         exit 1
     fi
+    if [[ ! -s "$LAUNCHER_SRC" ]]; then
+        error "Source file is empty: $LAUNCHER_SRC"
+        exit 1
+    fi
+    if [[ ! -r "$LAUNCHER_SRC" ]]; then
+        error "Source file not readable: $LAUNCHER_SRC"
+        exit 1
+    fi
 
+    # Check fish hook script
     if [[ ! -f "$FISH_HOOK_SRC" ]]; then
         error "Source file not found: $FISH_HOOK_SRC"
         exit 1
     fi
+    if [[ ! -s "$FISH_HOOK_SRC" ]]; then
+        error "Source file is empty: $FISH_HOOK_SRC"
+        exit 1
+    fi
+    if [[ ! -r "$FISH_HOOK_SRC" ]]; then
+        error "Source file not readable: $FISH_HOOK_SRC"
+        exit 1
+    fi
 
-    success "Source files found"
+    success "Source files found and verified"
 }
 
 # ============================================================================
@@ -453,9 +501,10 @@ detect_hyprlock_in_config() {
     for file in "${DETECTED_EXECS_FILES[@]}"; do
         [[ -f "$file" ]] || continue
 
-        # Match: exec-once = hyprlock (with optional spaces and arguments)
+        # Match: exec-once = hyprlock (with optional spaces, arguments, or semicolons)
         # Exclude: commented lines (# at start, possibly with leading whitespace)
-        if grep -qE '^[^#]*exec-once\s*=\s*hyprlock(\s|$)' "$file" 2>/dev/null; then
+        # Pattern handles: hyprlock, hyprlock;, hyprlock --arg, hyprlock &
+        if grep -qE '^[^#]*exec-once\s*=\s*hyprlock(\s|;|&|$)' "$file" 2>/dev/null; then
             HYPRLOCK_CONFIGURED_FILES+=("$file")
         fi
     done
@@ -650,8 +699,12 @@ check_uwsm_status() {
         inactive)
             echo "inactive"
             ;;
+        failed)
+            # Distinguish failed from not-found - failed means UWSM IS configured but broken
+            echo "failed"
+            ;;
         *)
-            # "unknown", "could not be found", etc.
+            # "unknown", "could not be found", timeout, etc.
             echo "not-found"
             ;;
     esac
@@ -660,7 +713,8 @@ check_uwsm_status() {
 # Present session method selection (UWSM vs exec-once)
 # Sets: SESSION_METHOD to "exec-once" or "uwsm"
 present_session_method() {
-    local max_help_attempts=5
+    # Generous limit - user may need multiple attempts to understand
+    local max_help_attempts=10
     local help_attempts=0
 
     echo ""
@@ -670,14 +724,26 @@ present_session_method() {
     echo ""
     echo -e "  ${YELLOW}⚠️  Choosing the wrong method will prevent hyprlock from starting!${NC}"
     echo ""
+    echo -e "  ${CYAN}WHAT IS UWSM?${NC}"
+    echo "    UWSM (Universal Wayland Session Manager) runs Hyprland via systemd."
+    echo "    If you run 'uwsm start hyprland' or use a UWSM display manager, choose 2."
+    echo ""
+    echo -e "  ${CYAN}WHAT IS EXEC-ONCE?${NC}"
+    echo "    This is the traditional method where Hyprland starts from ~/.config/hypr/"
+    echo "    If you log into TTY and Hyprland auto-starts, choose 1."
+    echo ""
+    echo "  ─────────────────────────────────────────────────────────────────"
+    echo ""
     echo "    1) Direct/TTY autologin (exec-once method)"
-    echo "       You log into a TTY and Hyprland starts automatically or manually"
+    echo "       • You log into a TTY and Hyprland starts automatically"
+    echo "       • Your startup is configured in ~/.config/hypr/execs.conf"
     echo ""
     echo "    2) UWSM managed session (systemd service method)"
-    echo "       You use 'uwsm start hyprland' or a UWSM-based display manager"
+    echo "       • You use 'uwsm start hyprland' or SDDM/GDM with UWSM"
+    echo "       • Hyprland runs as a systemd user service"
     echo ""
     echo "    3) I don't know / Not sure"
-    echo "       Get help figuring out which method you use"
+    echo "       • Let the installer detect your current setup"
     echo ""
 
     while true; do
@@ -857,9 +923,12 @@ install_launcher_script() {
 
     # If specific DRM path was chosen, add it to the script
     if [[ "$DETECTED_DRM_PATH" != "auto" ]]; then
-        # Escape path for sed (handle backslashes and ampersands)
-        local escaped_drm_path="${DETECTED_DRM_PATH//\\/\\\\}"
-        escaped_drm_path="${escaped_drm_path//&/\\&}"
+        # Escape path for sed - handle all special characters
+        # Order matters: backslashes first, then other special chars
+        local escaped_drm_path="${DETECTED_DRM_PATH//\\/\\\\}"  # \ -> \\
+        escaped_drm_path="${escaped_drm_path//&/\\&}"            # & -> \&
+        escaped_drm_path="${escaped_drm_path//\//\\/}"           # / -> \/
+        escaped_drm_path="${escaped_drm_path//\$/\\$}"           # $ -> \$
 
         # Add HYPR_DRM_PATH after the shebang
         sed -i "2i\\
@@ -869,6 +938,12 @@ set -gx HYPR_DRM_PATH \"$escaped_drm_path\"\\
     fi
 
     chmod +x "$temp_file" || { error "Failed to make script executable"; return 1; }
+
+    # Security: Check for symlink at destination (TOCTOU mitigation)
+    if [[ -L "$LAUNCHER_DEST" ]]; then
+        warn "Removing existing symlink at destination: $LAUNCHER_DEST"
+        rm -f "$LAUNCHER_DEST" || { error "Failed to remove symlink"; return 1; }
+    fi
 
     # Atomic move: only replace destination if all above succeeded
     mv "$temp_file" "$LAUNCHER_DEST" || { error "Failed to install launcher script"; return 1; }
@@ -892,6 +967,12 @@ install_fish_hook() {
     trap "rm -f '$temp_file'" RETURN
 
     cp "$FISH_HOOK_SRC" "$temp_file" || { error "Failed to copy fish hook"; return 1; }
+
+    # Security: Check for symlink at destination (TOCTOU mitigation)
+    if [[ -L "$FISH_HOOK_DEST" ]]; then
+        warn "Removing existing symlink at destination: $FISH_HOOK_DEST"
+        rm -f "$FISH_HOOK_DEST" || { error "Failed to remove symlink"; return 1; }
+    fi
 
     # Atomic move: only replace destination if copy succeeded
     mv "$temp_file" "$FISH_HOOK_DEST" || { error "Failed to install fish hook"; return 1; }
@@ -929,16 +1010,16 @@ install_hyprlock_service() {
         return 1
     fi
 
-    # Reload and enable
-    systemctl --user daemon-reload || { error "Failed to reload user systemd"; return 1; }
+    # Reload and enable (with timeouts to prevent hang)
+    timeout 5 systemctl --user daemon-reload || { error "Failed to reload user systemd (timeout)"; return 1; }
 
     # Verify service is loadable before enabling
-    if ! systemctl --user cat hyprlock.service >/dev/null 2>&1; then
+    if ! timeout 3 systemctl --user cat hyprlock.service >/dev/null 2>&1; then
         error "Systemd cannot load hyprlock.service - check file format"
         return 1
     fi
 
-    systemctl --user enable hyprlock.service || { error "Failed to enable hyprlock service"; return 1; }
+    timeout 5 systemctl --user enable hyprlock.service || { error "Failed to enable hyprlock service (timeout)"; return 1; }
 
     success "Hyprlock service installed and enabled: $HYPRLOCK_SERVICE_DEST"
 }
@@ -953,10 +1034,10 @@ remove_hyprlock_service() {
         return 0
     fi
 
-    # Disable first, then remove
-    systemctl --user disable hyprlock.service 2>/dev/null || true
+    # Disable first, then remove (with timeouts)
+    timeout 5 systemctl --user disable hyprlock.service 2>/dev/null || true
     rm -f "$HYPRLOCK_SERVICE_DEST" || { warn "Could not remove service file"; }
-    systemctl --user daemon-reload || { warn "Failed to reload user systemd"; }
+    timeout 5 systemctl --user daemon-reload || { warn "Failed to reload user systemd"; }
 
     success "Removed hyprlock systemd service"
 }
@@ -1095,7 +1176,7 @@ create_autologin_override() {
 
     # Backup existing override file before modification
     if [[ -f "$SYSTEMD_OVERRIDE_FILE" ]]; then
-        local backup_file="${SYSTEMD_OVERRIDE_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+        local backup_file="${SYSTEMD_OVERRIDE_FILE}.backup.$(date +%Y%m%d_%H%M%S_%N)"
         sudo cp -p "$SYSTEMD_OVERRIDE_FILE" "$backup_file" || warn "Failed to backup existing override file"
         info "Backed up existing config to: $backup_file"
     fi
@@ -1106,7 +1187,14 @@ ExecStart=
 ExecStart=-/usr/bin/agetty -o "-p -f -- \\u" --noclear --autologin "$DETECTED_USERNAME" %I \$TERM
 EOF
 
-    sudo systemctl daemon-reload || { error "Failed to reload systemd daemon"; return 1; }
+    # Use timeout to prevent hang if systemd is unresponsive
+    sudo timeout 5 systemctl daemon-reload || { error "Failed to reload systemd daemon (timeout)"; return 1; }
+
+    # Validate the systemd config can be parsed (catches syntax errors early)
+    if ! sudo timeout 3 systemctl cat getty@tty1.service >/dev/null 2>&1; then
+        warn "Systemd may have issues parsing getty@tty1 config - check manually"
+    fi
+
     success "Autologin configured for: $DETECTED_USERNAME"
 }
 
@@ -1252,7 +1340,7 @@ disable_sddm() {
     fi
 
     if is_sddm_enabled; then
-        sudo systemctl disable sddm || { error "Failed to disable SDDM"; return 1; }
+        sudo timeout 5 systemctl disable sddm || { error "Failed to disable SDDM (timeout)"; return 1; }
         success "SDDM disabled"
     else
         info "SDDM was already disabled"
@@ -1335,7 +1423,7 @@ uninstall() {
                 echo "$(dry_run_prefix)Would remove: $SYSTEMD_OVERRIDE_FILE"
             else
                 sudo rm -f "$SYSTEMD_OVERRIDE_FILE"
-                sudo systemctl daemon-reload
+                sudo timeout 5 systemctl daemon-reload || warn "Systemd reload timed out"
                 success "Removed systemd override"
             fi
         fi
@@ -1356,7 +1444,7 @@ uninstall() {
         if $DRY_RUN; then
             echo "$(dry_run_prefix)Would run: sudo systemctl enable sddm"
         else
-            sudo systemctl enable sddm
+            sudo timeout 5 systemctl enable sddm || { error "Failed to enable SDDM (timeout)"; }
             success "SDDM re-enabled"
         fi
     fi
@@ -1508,12 +1596,17 @@ install() {
     # Phase 2: User-level installation
     echo ""
     info "Installing user-level components..."
+    CRITICAL_OPERATION="installing launcher script"
     install_launcher_script || { error "Launcher script installation failed - aborting"; exit 1; }
+    CRITICAL_OPERATION="installing fish hook"
     install_fish_hook || { error "Fish hook installation failed - aborting"; exit 1; }
+    CRITICAL_OPERATION=""
 
     # Install hyprlock service for UWSM users
     if [[ "$SESSION_METHOD" == "uwsm" ]]; then
+        CRITICAL_OPERATION="installing hyprlock service"
         install_hyprlock_service || { error "Hyprlock service installation failed - aborting"; exit 1; }
+        CRITICAL_OPERATION=""
     fi
 
     # Show hyprlock setup instructions (conditional on session method)
@@ -1521,7 +1614,9 @@ install() {
 
     # Phase 3: System-level installation
     if request_sudo; then
+        CRITICAL_OPERATION="configuring systemd autologin"
         create_autologin_override
+        CRITICAL_OPERATION=""
 
         # Phase 4: Staged testing
         setup_tty2_testing
@@ -1530,7 +1625,9 @@ install() {
 
         # Phase 5: SDDM cutover
         confirm_sddm_disable
+        CRITICAL_OPERATION="disabling SDDM (display manager)"
         disable_sddm
+        CRITICAL_OPERATION=""
         show_final_instructions
     else
         echo ""
