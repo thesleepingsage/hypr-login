@@ -14,7 +14,7 @@
 #   ~/.config/hypr-login/install.conf
 #
 
-set -eu
+set -euo pipefail
 
 # ============================================================================
 # SECTION 1: Help
@@ -164,7 +164,8 @@ trap cleanup_on_interrupt INT TERM
 # ============================================================================
 
 # Prevent multiple instances from running simultaneously
-LOCK_FILE="/tmp/hypr-login-install.lock"
+# Use XDG_RUNTIME_DIR if available (per-user, tmpfs), fallback to /tmp
+LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/hypr-login-install.lock"
 acquire_lock() {
     exec 200>"$LOCK_FILE"
     if ! flock -n 200; then
@@ -622,13 +623,21 @@ present_username() {
     info "Username: $DETECTED_USERNAME"
 
     if ! ask_yes "Use this username for autologin?"; then
-        echo -n "Enter username: "
-        read -r DETECTED_USERNAME
+        while true; do
+            echo -n "Enter username: "
+            read -r DETECTED_USERNAME
 
-        if ! id "$DETECTED_USERNAME" &>/dev/null; then
-            error "User '$DETECTED_USERNAME' does not exist"
-            exit 1
-        fi
+            if [[ -z "$DETECTED_USERNAME" ]]; then
+                warn "Username cannot be empty"
+                continue
+            fi
+
+            if ! id "$DETECTED_USERNAME" &>/dev/null; then
+                warn "User '$DETECTED_USERNAME' does not exist"
+                continue
+            fi
+            break
+        done
     fi
 
     success "Username confirmed: $DETECTED_USERNAME"
@@ -718,15 +727,17 @@ select_primary_gpu() {
         ((i++))
     done
     echo ""
-    echo -n "  Choose [1-${#options[@]}]: "
-    read -r gpu_choice
 
-    if [[ "$gpu_choice" =~ ^[0-9]+$ ]] && [[ "$gpu_choice" -ge 1 ]] && [[ "$gpu_choice" -le ${#options[@]} ]]; then
-        DETECTED_GPU_TYPE="${options[$((gpu_choice-1))]}"
-    else
-        warn "Invalid choice, using auto-detection"
-        DETECTED_GPU_TYPE="auto"
-    fi
+    while true; do
+        echo -n "  Choose [1-${#options[@]}]: "
+        read -r gpu_choice
+
+        if [[ "$gpu_choice" =~ ^[0-9]+$ ]] && [[ "$gpu_choice" -ge 1 ]] && [[ "$gpu_choice" -le ${#options[@]} ]]; then
+            DETECTED_GPU_TYPE="${options[$((gpu_choice-1))]}"
+            return
+        fi
+        warn "Invalid choice. Please enter 1-${#options[@]}."
+    done
 }
 
 present_gpu_options() {
@@ -801,7 +812,7 @@ present_config_info() {
     else
         echo "  Detected exec configs:"
         for file in "${DETECTED_EXECS_FILES[@]}"; do
-            local rel_path="${file#$HOME/}"
+            local rel_path="${file#"$HOME"/}"
             echo "    • ~/$rel_path"
         done
     fi
@@ -816,7 +827,7 @@ present_config_info() {
         echo ""
         warn "hyprlock already configured in:"
         for file in "${HYPRLOCK_CONFIGURED_FILES[@]}"; do
-            local rel_path="${file#$HOME/}"
+            local rel_path="${file#"$HOME"/}"
             echo "    • ~/$rel_path"
         done
     fi
@@ -844,6 +855,43 @@ check_uwsm_status() {
             echo "not-found"
             ;;
     esac
+}
+
+# Manual session method selection menu
+# Sets: SESSION_METHOD to "exec-once" or "uwsm"
+select_session_method_manual() {
+    echo ""
+    echo "  ─────────────────────────────────────────────────────────────────"
+    echo -e "  ${BOLD}Manual Selection${NC}"
+    echo "  ─────────────────────────────────────────────────────────────────"
+    echo ""
+    echo -e "  ${CYAN}UWSM${NC}: Hyprland runs via systemd (uwsm start hyprland)"
+    echo -e "  ${CYAN}exec-once${NC}: Hyprland starts from TTY/shell config"
+    echo ""
+    echo "    1) Direct/TTY autologin (exec-once method)"
+    echo "    2) UWSM managed session (systemd service method)"
+    echo ""
+
+    while true; do
+        echo -n "  Choose [1-2]: "
+        read -r method_choice
+
+        case "$method_choice" in
+            1)
+                SESSION_METHOD="exec-once"
+                success "Session method: exec-once (hyprlock added to Hyprland config)"
+                return 0
+                ;;
+            2)
+                SESSION_METHOD="uwsm"
+                success "Session method: UWSM (hyprlock as systemd service)"
+                return 0
+                ;;
+            *)
+                warn "Invalid choice. Please enter 1 or 2."
+                ;;
+        esac
+    done
 }
 
 # Present session method selection (UWSM vs exec-once)
@@ -899,38 +947,7 @@ present_session_method() {
     esac
 
     # Manual selection (only reached if auto-detect was declined or failed)
-    echo ""
-    echo "  ─────────────────────────────────────────────────────────────────"
-    echo -e "  ${BOLD}Manual Selection${NC}"
-    echo "  ─────────────────────────────────────────────────────────────────"
-    echo ""
-    echo -e "  ${CYAN}UWSM${NC}: Hyprland runs via systemd (uwsm start hyprland)"
-    echo -e "  ${CYAN}exec-once${NC}: Hyprland starts from TTY/shell config"
-    echo ""
-    echo "    1) Direct/TTY autologin (exec-once method)"
-    echo "    2) UWSM managed session (systemd service method)"
-    echo ""
-
-    while true; do
-        echo -n "  Choose [1-2]: "
-        read -r method_choice
-
-        case "$method_choice" in
-            1)
-                SESSION_METHOD="exec-once"
-                success "Session method: exec-once (hyprlock added to Hyprland config)"
-                return 0
-                ;;
-            2)
-                SESSION_METHOD="uwsm"
-                success "Session method: UWSM (hyprlock as systemd service)"
-                return 0
-                ;;
-            *)
-                warn "Invalid choice. Please enter 1 or 2."
-                ;;
-        esac
-    done
+    select_session_method_manual
 }
 
 show_detection_summary() {
@@ -958,26 +975,11 @@ show_detection_summary() {
 # SECTION 13: Installation Functions
 # ============================================================================
 
-install_launcher_script() {
-    local dest_dir
-    dest_dir=$(dirname "$LAUNCHER_DEST")
+# Apply GPU-specific environment variables to launcher script
+# Args: $1 = temp file path
+apply_gpu_env_config() {
+    local temp_file="$1"
 
-    if dry_run_preview "Would create: $LAUNCHER_DEST"; then
-        return 0
-    fi
-
-    mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
-
-    # Use temp file for atomic operations - only move to final destination if all succeeds
-    local temp_file
-    temp_file=$(mktemp /tmp/hypr-login-XXXXXX.tmp) || { error "Failed to create temp file"; return 1; }
-    trap "rm -f '$temp_file'" RETURN
-
-    # Copy the base script to temp file
-    cp "$LAUNCHER_SRC" "$temp_file" || { error "Failed to copy launcher script"; return 1; }
-
-    # Uncomment the appropriate GPU section based on detection
-    # All sed operations happen on temp file - atomic application
     case "$DETECTED_GPU_TYPE" in
         nvidia)
             info "Configuring NVIDIA GPU settings..."
@@ -1000,23 +1002,51 @@ install_launcher_script() {
             info "GPU type 'auto' - leaving configuration for runtime detection"
             ;;
     esac
+}
 
-    # If specific DRM path was chosen, add it to the script
-    if [[ "$DETECTED_DRM_PATH" != "auto" ]]; then
-        info "Setting DRM path: $DETECTED_DRM_PATH"
-        # Escape path for sed - handle all special characters
-        # Order matters: backslashes first, then other special chars
-        local escaped_drm_path="${DETECTED_DRM_PATH//\\/\\\\}"  # \ -> \\
-        escaped_drm_path="${escaped_drm_path//&/\\&}"            # & -> \&
-        escaped_drm_path="${escaped_drm_path//\//\\/}"           # / -> \/
-        escaped_drm_path="${escaped_drm_path//\$/\\$}"           # $ -> \$
+# Apply DRM path configuration to launcher script
+# Args: $1 = temp file path
+apply_drm_path_config() {
+    local temp_file="$1"
 
-        # Add HYPR_DRM_PATH after the shebang
-        sed -i "2i\\
+    [[ "$DETECTED_DRM_PATH" == "auto" ]] && return 0
+
+    info "Setting DRM path: $DETECTED_DRM_PATH"
+    # Escape path for sed - handle all special characters
+    # Order matters: backslashes first, then other special chars
+    local escaped_drm_path="${DETECTED_DRM_PATH//\\/\\\\}"  # \ -> \\
+    escaped_drm_path="${escaped_drm_path//&/\\&}"            # & -> \&
+    escaped_drm_path="${escaped_drm_path//\//\\/}"           # / -> \/
+    escaped_drm_path="${escaped_drm_path//\$/\\$}"           # $ -> \$
+
+    # Add HYPR_DRM_PATH after the shebang
+    sed -i "2i\\
 # DRM path set by installer\\
 set -gx HYPR_DRM_PATH \"$escaped_drm_path\"\\
 " "$temp_file" || { error "Failed to set DRM path"; return 1; }
+}
+
+install_launcher_script() {
+    local dest_dir
+    dest_dir=$(dirname "$LAUNCHER_DEST")
+
+    if dry_run_preview "Would create: $LAUNCHER_DEST"; then
+        return 0
     fi
+
+    mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
+
+    # Use temp file for atomic operations - only move to final destination if all succeeds
+    local temp_file
+    temp_file=$(mktemp /tmp/hypr-login-XXXXXX.tmp) || { error "Failed to create temp file"; return 1; }
+    trap 'rm -f "$temp_file"' RETURN
+
+    # Copy the base script to temp file
+    cp "$LAUNCHER_SRC" "$temp_file" || { error "Failed to copy launcher script"; return 1; }
+
+    # Apply GPU and DRM configurations
+    apply_gpu_env_config "$temp_file" || return 1
+    apply_drm_path_config "$temp_file" || return 1
 
     chmod +x "$temp_file" || { error "Failed to make script executable"; return 1; }
 
@@ -1042,7 +1072,7 @@ install_fish_hook() {
     # Use temp file for atomic installation
     local temp_file
     temp_file=$(mktemp /tmp/hypr-login-XXXXXX.tmp) || { error "Failed to create temp file"; return 1; }
-    trap "rm -f '$temp_file'" RETURN
+    trap 'rm -f "$temp_file"' RETURN
 
     cp "$FISH_HOOK_SRC" "$temp_file" || { error "Failed to copy fish hook"; return 1; }
 
@@ -1134,7 +1164,7 @@ show_uwsm_service_configured() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
-    read -p "Press Enter to continue..."
+    read -r -p "Press Enter to continue..."
 }
 
 # Warn about hybrid configuration (exec-once + UWSM service both present)
@@ -1158,7 +1188,7 @@ check_hybrid_configuration() {
     if ! ask "Continue anyway? (NOT RECOMMENDED)"; then
         info "Skipping hyprlock configuration to prevent hybrid setup"
         echo ""
-        read -p "Press Enter to continue..."
+        read -r -p "Press Enter to continue..."
         return 1
     fi
     warn "Proceeding with hybrid configuration - you may experience issues"
@@ -1177,7 +1207,7 @@ check_existing_hyprlock_config() {
     echo ""
     echo "  Found existing hyprlock configuration in:"
     for file in "${HYPRLOCK_CONFIGURED_FILES[@]}"; do
-        local rel_path="${file#$HOME/}"
+        local rel_path="${file#"$HOME"/}"
         echo "      • ~/$rel_path"
     done
     echo ""
@@ -1185,7 +1215,7 @@ check_existing_hyprlock_config() {
     if ! ask "Add hyprlock to config anyway? (creates duplicate)"; then
         success "Skipping hyprlock configuration (already present)"
         echo ""
-        read -p "Press Enter to continue..."
+        read -r -p "Press Enter to continue..."
         return 1
     fi
     warn "Proceeding - you may have duplicate hyprlock entries"
@@ -1208,7 +1238,7 @@ show_execonce_manual_instructions() {
     if [[ ${#DETECTED_EXECS_FILES[@]} -gt 0 ]]; then
         echo "  Your exec config files:"
         for file in "${DETECTED_EXECS_FILES[@]}"; do
-            local rel_path="${file#$HOME/}"
+            local rel_path="${file#"$HOME"/}"
             echo "      • ~/$rel_path"
         done
         echo ""
@@ -1234,7 +1264,7 @@ show_execonce_manual_instructions() {
     fi
 
     echo ""
-    read -p "Press Enter when you've added the line..."
+    read -r -p "Press Enter when you've added the line..."
 }
 
 # Show instructions for hyprlock setup based on session method
@@ -1277,8 +1307,8 @@ request_sudo() {
         return 1
     fi
 
-    # Test sudo access
-    if ! sudo -v; then
+    # Test sudo access (with timeout to prevent hang)
+    if ! timeout 60 sudo -v; then
         error "Failed to get sudo access"
         return 1
     fi
@@ -1298,6 +1328,12 @@ create_autologin_override() {
         local backup_file="${SYSTEMD_OVERRIDE_DEST}.backup.$(date +%Y%m%d_%H%M%S_%N)"
         sudo cp -p "$SYSTEMD_OVERRIDE_DEST" "$backup_file" || warn "Failed to backup existing override file"
         info "Backed up existing config to: $backup_file"
+    fi
+
+    # Re-validate username immediately before use (defense in depth)
+    if ! id "$DETECTED_USERNAME" &>/dev/null; then
+        error "Username no longer valid: $DETECTED_USERNAME"
+        return 1
     fi
 
     cat << EOF | sudo tee "$SYSTEMD_OVERRIDE_DEST" > /dev/null || { error "Failed to write autologin config"; return 1; }
@@ -1337,9 +1373,9 @@ setup_tty2_testing() {
     fi
 
     info "Starting getty on tty2..."
-    if sudo systemctl start getty@tty2 2>/dev/null; then
+    if systemctl_safe --sudo --quiet start getty@tty2; then
         success "getty@tty2 started"
-    elif systemctl is-active getty@tty2 >/dev/null 2>&1; then
+    elif systemctl_safe --quiet is-active getty@tty2; then
         info "getty@tty2 already running"
     else
         warn "Could not start getty@tty2 - you may need to start it manually"
@@ -1366,7 +1402,65 @@ guide_tty2_test() {
     echo "    • Return here to troubleshoot"
     echo ""
 
-    read -p "Press Enter when ready to test (then switch to tty2)..."
+    read -r -p "Press Enter when ready to test (then switch to tty2)..."
+}
+
+# Handle troubleshooting menu when test fails
+# Returns: 0 to continue testing, 1 to exit installer
+handle_test_troubleshooting() {
+    echo ""
+    echo "  Troubleshooting options:"
+    echo "    1) View ~/.hyprland.log"
+    echo "    2) Edit launcher script"
+    echo "    3) Try test again"
+    echo "    4) Exit installer (SDDM not modified)"
+    echo ""
+    echo -n "  Choose [1-4]: "
+    read -r trouble_choice
+
+    case "$trouble_choice" in
+        1)
+            echo ""
+            echo "=== Last 50 lines of ~/.hyprland.log ==="
+            tail -50 ~/.hyprland.log 2>/dev/null || echo "(Log file not found)"
+            echo ""
+            read -r -p "Press Enter to continue..."
+            ;;
+        2)
+            # Find a working editor: EDITOR, then common defaults
+            local edit_cmd=""
+            if [[ -n "${EDITOR:-}" ]] && command -v "$EDITOR" >/dev/null 2>&1; then
+                edit_cmd="$EDITOR"
+            else
+                for candidate in nano vim nvim vi; do
+                    if command -v "$candidate" >/dev/null 2>&1; then
+                        edit_cmd="$candidate"
+                        break
+                    fi
+                done
+            fi
+            if [[ -n "$edit_cmd" ]]; then
+                "$edit_cmd" "$LAUNCHER_DEST" || warn "Editor exited with error"
+            else
+                warn "No editor found (tried: \$EDITOR, nano, vim, nvim, vi)"
+                echo "  Edit manually: $LAUNCHER_DEST"
+            fi
+            ;;
+        3)
+            guide_tty2_test
+            ;;
+        4)
+            info "Exiting - SDDM not modified"
+            echo ""
+            echo "  User-level components are installed."
+            echo "  Fix issues and re-run installer when ready."
+            return 1
+            ;;
+        *)
+            warn "Invalid choice. Please enter 1-4."
+            ;;
+    esac
+    return 0
 }
 
 confirm_test_passed() {
@@ -1406,58 +1500,9 @@ confirm_test_passed() {
         fi
 
         warn "Test did not pass"
-        echo ""
-        echo "  Troubleshooting options:"
-        echo "    1) View ~/.hyprland.log"
-        echo "    2) Edit launcher script"
-        echo "    3) Try test again"
-        echo "    4) Exit installer (SDDM not modified)"
-        echo ""
-        echo -n "  Choose [1-4]: "
-        read -r trouble_choice
-
-        case "$trouble_choice" in
-            1)
-                echo ""
-                echo "=== Last 50 lines of ~/.hyprland.log ==="
-                tail -50 ~/.hyprland.log 2>/dev/null || echo "(Log file not found)"
-                echo ""
-                read -p "Press Enter to continue..."
-                ;;
-            2)
-                # Find a working editor: EDITOR, then common defaults
-                local edit_cmd=""
-                if [[ -n "${EDITOR:-}" ]] && command -v "$EDITOR" >/dev/null 2>&1; then
-                    edit_cmd="$EDITOR"
-                else
-                    for candidate in nano vim nvim vi; do
-                        if command -v "$candidate" >/dev/null 2>&1; then
-                            edit_cmd="$candidate"
-                            break
-                        fi
-                    done
-                fi
-                if [[ -n "$edit_cmd" ]]; then
-                    "$edit_cmd" "$LAUNCHER_DEST" || warn "Editor exited with error"
-                else
-                    warn "No editor found (tried: \$EDITOR, nano, vim, nvim, vi)"
-                    echo "  Edit manually: $LAUNCHER_DEST"
-                fi
-                ;;
-            3)
-                guide_tty2_test
-                ;;
-            4)
-                info "Exiting - SDDM not modified"
-                echo ""
-                echo "  User-level components are installed."
-                echo "  Fix issues and re-run installer when ready."
-                exit 0
-                ;;
-            *)
-                warn "Invalid choice. Please enter 1-4."
-                ;;
-        esac
+        if ! handle_test_troubleshooting; then
+            exit 0  # User chose to exit
+        fi
     done
 }
 
@@ -1541,31 +1586,11 @@ show_final_instructions() {
 # SECTION 17: Uninstall Functions
 # ============================================================================
 
-uninstall() {
-    echo ""
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo -e "  ${BOLD}UNINSTALL hypr-login${NC}"
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo ""
+# Remove user-level components (launcher, fish hook, service, config, backups)
+# Args: $1 = was_uwsm (true/false)
+uninstall_user_components() {
+    local was_uwsm="$1"
 
-    # Load saved configuration to know which method was used
-    local was_uwsm=false
-    if load_install_config && [[ "$SESSION_METHOD" == "uwsm" ]]; then
-        was_uwsm=true
-        info "Detected UWSM installation"
-    elif is_hyprlock_service_installed; then
-        was_uwsm=true
-        info "Detected hyprlock systemd service"
-    fi
-
-    if ! ask_yes "Remove all hypr-login components?"; then
-        info "Uninstall cancelled"
-        exit 0
-    fi
-
-    echo ""
-
-    # Remove user-level components
     remove_if_exists "$LAUNCHER_DEST" "Launcher script"
     remove_if_exists "$FISH_HOOK_DEST" "Fish hook"
 
@@ -1598,20 +1623,54 @@ uninstall() {
     if [[ $backup_count -gt 0 ]]; then
         success "Cleaned up $backup_count backup file(s)"
     fi
+}
 
-    # Remove systemd override (requires sudo)
-    if [[ -f "$SYSTEMD_OVERRIDE_DEST" ]]; then
-        if ask_yes "Remove systemd autologin override? (requires sudo)"; then
-            if $DRY_RUN; then
-                echo "$(dry_run_prefix)Would remove: $SYSTEMD_OVERRIDE_DEST"
-            else
-                sudo rm -f "$SYSTEMD_OVERRIDE_DEST" || warn "Could not remove systemd override"
-                systemctl_safe --sudo daemon-reload || warn "Systemd reload timed out"
-                success "Removed systemd override"
-            fi
-        fi
+# Remove systemd autologin override (requires sudo)
+uninstall_system_component() {
+    [[ -f "$SYSTEMD_OVERRIDE_DEST" ]] || return 0
+
+    if ! ask_yes "Remove systemd autologin override? (requires sudo)"; then
+        return 0
     fi
 
+    if $DRY_RUN; then
+        echo "$(dry_run_prefix)Would remove: $SYSTEMD_OVERRIDE_DEST"
+    else
+        sudo rm -f "$SYSTEMD_OVERRIDE_DEST" || warn "Could not remove systemd override"
+        systemctl_safe --sudo daemon-reload || warn "Systemd reload timed out"
+        success "Removed systemd override"
+    fi
+}
+
+uninstall() {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "  ${BOLD}UNINSTALL hypr-login${NC}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+
+    # Load saved configuration to know which method was used
+    local was_uwsm=false
+    if load_install_config && [[ "$SESSION_METHOD" == "uwsm" ]]; then
+        was_uwsm=true
+        info "Detected UWSM installation"
+    elif is_hyprlock_service_installed; then
+        was_uwsm=true
+        info "Detected hyprlock systemd service"
+    fi
+
+    if ! ask_yes "Remove all hypr-login components?"; then
+        info "Uninstall cancelled"
+        exit 0
+    fi
+
+    echo ""
+
+    # Remove components
+    uninstall_user_components "$was_uwsm"
+    uninstall_system_component
+
+    # Show remaining manual steps
     echo ""
     echo -e "  ${YELLOW}Remaining manual steps:${NC}"
     if $was_uwsm; then
