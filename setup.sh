@@ -994,7 +994,7 @@ install_launcher_script() {
 
     # Use temp file for atomic operations - only move to final destination if all succeeds
     local temp_file
-    temp_file=$(mktemp) || { error "Failed to create temp file"; return 1; }
+    temp_file=$(mktemp /tmp/hypr-login-XXXXXX.tmp) || { error "Failed to create temp file"; return 1; }
     trap "rm -f '$temp_file'" RETURN
 
     # Copy the base script to temp file
@@ -1068,7 +1068,7 @@ install_fish_hook() {
 
     # Use temp file for atomic installation
     local temp_file
-    temp_file=$(mktemp) || { error "Failed to create temp file"; return 1; }
+    temp_file=$(mktemp /tmp/hypr-login-XXXXXX.tmp) || { error "Failed to create temp file"; return 1; }
     trap "rm -f '$temp_file'" RETURN
 
     cp "$FISH_HOOK_SRC" "$temp_file" || { error "Failed to copy fish hook"; return 1; }
@@ -1250,12 +1250,12 @@ show_execs_instructions() {
     # Only offer EDITOR if it's set AND executable
     if [[ -n "${EDITOR:-}" ]] && command -v "$EDITOR" >/dev/null 2>&1 && ask "Open your config in \$EDITOR ($EDITOR)?"; then
         if [[ ${#DETECTED_EXECS_FILES[@]} -eq 1 ]]; then
-            "$EDITOR" "${DETECTED_EXECS_FILES[0]}"
+            "$EDITOR" "${DETECTED_EXECS_FILES[0]}" || warn "Editor exited with error"
         elif [[ ${#DETECTED_EXECS_FILES[@]} -gt 1 ]]; then
             echo ""
             echo "  Which file to edit?"
             if select_from_menu "Choose" "${DETECTED_EXECS_FILES[@]}"; then
-                "$EDITOR" "$SELECT_RESULT"
+                "$EDITOR" "$SELECT_RESULT" || warn "Editor exited with error"
             fi
         fi
     fi
@@ -1554,7 +1554,7 @@ uninstall() {
 
     # Clean up backup files created during installation/updates
     local backup_count=0
-    local -a backup_dirs=("$LOCAL_BIN" "$FISH_CONF_DIR" "$HYPRLOCK_SERVICE_DEST")
+    local -a backup_dirs=("$LAUNCHER_DEST" "$FISH_HOOK_DEST" "$HYPRLOCK_SERVICE_DEST")
 
     for dir in "${backup_dirs[@]}"; do
         local parent_dir
@@ -1611,7 +1611,10 @@ uninstall() {
     success "Uninstall complete"
 
     if ask_yes "Reboot now?"; then
-        sudo reboot
+        sudo reboot || {
+            error "Reboot command failed"
+            echo "  Run manually: sudo reboot"
+        }
     fi
 }
 
