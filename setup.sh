@@ -1612,6 +1612,36 @@ uninstall() {
 # SECTION 18: Update Mode
 # ============================================================================
 
+# Update hyprlock service if needed (UWSM method)
+update_hyprlock_service() {
+    # Skip if not using UWSM and no service installed
+    [[ "$SESSION_METHOD" != "uwsm" ]] && ! is_hyprlock_service_installed && return 0
+
+    if is_hyprlock_service_installed; then
+        info "Updating hyprlock systemd service..."
+        backup_file "$HYPRLOCK_SERVICE_DEST"
+        install_hyprlock_service
+    elif [[ "$SESSION_METHOD" == "uwsm" ]]; then
+        info "Installing hyprlock systemd service (UWSM method)..."
+        install_hyprlock_service
+    fi
+}
+
+# Verify/repair systemd configuration
+update_systemd_config() {
+    if ! is_systemd_configured; then
+        warn "Systemd autologin override missing"
+        if ask_yes "Reconfigure systemd autologin?"; then
+            detect_username
+            if request_sudo; then
+                create_autologin_override
+            fi
+        fi
+    else
+        success "Systemd configuration intact"
+    fi
+}
+
 update() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
@@ -1619,6 +1649,7 @@ update() {
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
 
+    # Redirect to full install if not installed
     if ! is_launcher_installed && ! is_fish_hook_installed; then
         warn "hypr-login not installed. Running full installation..."
         install
@@ -1634,10 +1665,8 @@ update() {
 
     validate_source_files
 
-    # Backup and update launcher
-    if is_launcher_installed; then
-        backup_file "$LAUNCHER_DEST"
-    fi
+    # Backup existing launcher
+    is_launcher_installed && backup_file "$LAUNCHER_DEST"
 
     # Re-run detection for GPU settings
     detect_gpus
@@ -1647,30 +1676,11 @@ update() {
     install_launcher_script
     install_fish_hook
 
-    # Update hyprlock service if UWSM method was used
-    if [[ "$SESSION_METHOD" == "uwsm" ]] || is_hyprlock_service_installed; then
-        if is_hyprlock_service_installed; then
-            info "Updating hyprlock systemd service..."
-            backup_file "$HYPRLOCK_SERVICE_DEST"
-            install_hyprlock_service
-        elif [[ "$SESSION_METHOD" == "uwsm" ]]; then
-            info "Installing hyprlock systemd service (UWSM method)..."
-            install_hyprlock_service
-        fi
-    fi
+    # Update UWSM service if applicable
+    update_hyprlock_service
 
-    # Check systemd configuration
-    if ! is_systemd_configured; then
-        warn "Systemd autologin override missing"
-        if ask_yes "Reconfigure systemd autologin?"; then
-            detect_username
-            if request_sudo; then
-                create_autologin_override
-            fi
-        fi
-    else
-        success "Systemd configuration intact"
-    fi
+    # Verify systemd configuration
+    update_systemd_config
 
     echo ""
     success "Update complete"
@@ -1681,7 +1691,8 @@ update() {
 # SECTION 19: Main Installation
 # ============================================================================
 
-install() {
+# Phase 0: Welcome banner and user confirmation
+install_show_welcome() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${BOLD}hypr-login Installer${NC}"
@@ -1717,8 +1728,10 @@ install() {
         info "Installation cancelled"
         exit 0
     fi
+}
 
-    # Pre-flight checks
+# Phase 1: Pre-flight checks
+install_preflight_checks() {
     echo ""
     info "Running pre-flight checks..."
     validate_dependencies
@@ -1728,11 +1741,14 @@ install() {
         warn "hypr-login appears to be already installed"
         if ask "Run update instead?"; then
             update
-            return
+            return 1  # Signal to caller to exit install flow
         fi
     fi
+    return 0
+}
 
-    # System detection
+# Phase 2: System detection and user confirmation
+install_detect_system() {
     echo ""
     info "Detecting system configuration..."
     detect_username
@@ -1751,8 +1767,10 @@ install() {
 
     # Save configuration for future updates
     save_install_config
+}
 
-    # Phase 2: User-level installation
+# Phase 3: User-level component installation
+install_user_components() {
     echo ""
     info "Installing user-level components..."
     CRITICAL_OPERATION="installing launcher script"
@@ -1770,8 +1788,10 @@ install() {
 
     # Show hyprlock setup instructions (conditional on session method)
     show_execs_instructions
+}
 
-    # Phase 3: System-level installation
+# Phase 4-6: System-level installation, testing, and cutover
+install_system_components() {
     if request_sudo; then
         CRITICAL_OPERATION="configuring systemd autologin"
         create_autologin_override
@@ -1800,6 +1820,15 @@ install() {
         echo "    4. Disable SDDM: sudo systemctl disable sddm"
         echo ""
     fi
+}
+
+# Main installation orchestrator
+install() {
+    install_show_welcome
+    install_preflight_checks || return
+    install_detect_system
+    install_user_components
+    install_system_components
 }
 
 # ============================================================================
