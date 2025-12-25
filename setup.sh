@@ -168,8 +168,7 @@ cleanup_on_interrupt() {
     exit $exit_code
 }
 
-# Set up trap for common interrupt signals
-trap 'cleanup_on_interrupt' INT TERM
+# Trap is set after acquiring lock (line 190) to ensure lock release on interrupt
 
 # ============================================================================
 # SECTION 5: Concurrent Execution Lock
@@ -187,6 +186,7 @@ acquire_lock() {
     fi
 }
 acquire_lock
+# Single trap handles both lock release AND cleanup (avoids trap overwrite issue)
 trap 'flock -u 200 2>/dev/null; cleanup_on_interrupt' INT TERM
 
 # ============================================================================
@@ -838,7 +838,7 @@ select_primary_gpu() {
 
     while true; do
         echo -n "  Choose [1-${#options[@]}]: "
-        read -r gpu_choice
+        read -r gpu_choice || { warn "Input cancelled"; return 1; }
 
         if [[ "$gpu_choice" =~ ^[0-9]+$ ]] && [[ "$gpu_choice" -ge 1 ]] && [[ "$gpu_choice" -le ${#options[@]} ]]; then
             DETECTED_GPU_TYPE="${options[$((gpu_choice-1))]}"
@@ -900,7 +900,7 @@ present_display_options() {
 
     while true; do
         echo -n "  Choose primary display [1-$i, blank=auto]: "
-        read -r display_choice
+        read -r display_choice || { warn "Input cancelled"; return 1; }
 
         if [[ "$display_choice" == "$i" ]] || [[ -z "$display_choice" ]]; then
             DETECTED_DRM_PATH="auto"
@@ -987,7 +987,7 @@ select_session_method_manual() {
 
     while true; do
         echo -n "  Choose [1-2]: "
-        read -r method_choice
+        read -r method_choice || { warn "Input cancelled"; return 1; }
 
         case "$method_choice" in
             1)
@@ -1833,7 +1833,8 @@ uninstall_user_components() {
 uninstall_system_component() {
     [[ -f "$SYSTEMD_OVERRIDE_DEST" ]] || return 0
 
-    if ! ask_yes "Remove systemd autologin override? (requires sudo)"; then
+    # Use ask() (default No) - destructive operation requires explicit opt-in
+    if ! ask "Remove systemd autologin override? (requires sudo)"; then
         return 0
     fi
 
@@ -2084,8 +2085,10 @@ install_detect_system() {
     present_session_method
     present_detection_summary
 
-    # Save configuration for future updates
-    save_install_config
+    # Save configuration for future updates (non-fatal if fails)
+    if ! save_install_config; then
+        warn "Could not save config - future updates may require re-detection"
+    fi
 }
 
 # Phase 3: User-level component installation
