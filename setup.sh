@@ -74,7 +74,6 @@ SKIP_TEST=false
 readonly SYSTEMCTL_DEFAULT_TIMEOUT=5   # Default for systemctl operations
 readonly SYSTEMCTL_VERIFY_TIMEOUT=3    # Quick status/config checks
 readonly SUDO_AUTH_TIMEOUT=60          # Time for user to enter sudo password
-readonly REBOOT_TIMEOUT=30             # Time for reboot command
 
 # Script directory (where this script lives)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -156,8 +155,11 @@ cleanup_on_interrupt() {
     # Also kill any direct child processes not captured by jobs
     pkill -TERM -P $$ 2>/dev/null || true
 
-    # Clean up any temp files that might exist
-    rm -f /tmp/hypr-login-*.tmp 2>/dev/null || true
+    # Clean up any temp files that might exist (use XDG_RUNTIME_DIR to match creation path)
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+        rm -f "$XDG_RUNTIME_DIR"/hypr-login-*.tmp 2>/dev/null || true
+    fi
+    rm -f /tmp/hypr-login-*.tmp 2>/dev/null || true  # Fallback for edge cases
 
     exit $exit_code
 }
@@ -425,7 +427,7 @@ install_file_atomically() {
     local desc="${4:-file}"
     local dest_dir
 
-    dest_dir=$(dirname "$dest")
+    dest_dir="$(dirname "$dest")"
 
     if dry_run_preview "Would create: $dest"; then
         return 0
@@ -525,29 +527,41 @@ EOF
 }
 
 # Load installation configuration from previous install
+# Security: Uses grep extraction instead of sourcing to prevent TOCTOU attacks
+# where a malicious file could be swapped in between validation and execution
 load_install_config() {
     [[ -f "$CONFIG_FILE" ]] || return 1
+    [[ -r "$CONFIG_FILE" ]] || { warn "Config file not readable: $CONFIG_FILE"; return 1; }
 
-    # Validate config file syntax before sourcing (security + corruption check)
-    if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
-        warn "Config file has syntax errors: $CONFIG_FILE"
-        warn "Ignoring saved configuration - will use fresh detection"
-        return 1
+    # Extract values via grep (safe - no code execution)
+    local loaded_session loaded_gpu loaded_drm
+    loaded_session=$(grep -E "^SESSION_METHOD=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+    loaded_gpu=$(grep -E "^GPU_TYPE=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+    loaded_drm=$(grep -E "^DRM_PATH=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+
+    # Validate SESSION_METHOD against strict allowlist
+    if [[ "$loaded_session" == "exec-once" || "$loaded_session" == "uwsm" ]]; then
+        SESSION_METHOD="$loaded_session"
+    elif [[ -n "$loaded_session" ]]; then
+        warn "Invalid SESSION_METHOD in config: $loaded_session"
     fi
 
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE" 2>/dev/null || {
-        warn "Failed to load config file"
-        return 1
-    }
-
-    # Validate loaded values are in expected range
-    if [[ -n "$SESSION_METHOD" ]] && [[ "$SESSION_METHOD" != "exec-once" && "$SESSION_METHOD" != "uwsm" ]]; then
-        warn "Invalid SESSION_METHOD in config: $SESSION_METHOD"
-        unset SESSION_METHOD
+    # Validate GPU_TYPE against known values
+    if [[ "$loaded_gpu" =~ ^(nvidia|amd|intel|auto)$ ]]; then
+        DETECTED_GPU_TYPE="$loaded_gpu"
+    elif [[ -n "$loaded_gpu" ]]; then
+        warn "Invalid GPU_TYPE in config: $loaded_gpu"
     fi
 
-    return 0
+    # Validate DRM_PATH format (or auto)
+    if [[ "$loaded_drm" == "auto" ]] || [[ "$loaded_drm" =~ ^/run/udev/data/\+drm:card[0-9]+-[A-Za-z0-9_-]+$ ]]; then
+        DETECTED_DRM_PATH="$loaded_drm"
+    elif [[ -n "$loaded_drm" ]]; then
+        warn "Invalid DRM_PATH in config: $loaded_drm"
+    fi
+
+    # Return success if at least one value was loaded
+    [[ -n "$SESSION_METHOD" || -n "$DETECTED_GPU_TYPE" || -n "$DETECTED_DRM_PATH" ]]
 }
 
 # ============================================================================
@@ -634,14 +648,14 @@ detect_gpus() {
         [[ -d "$card_dir/device" ]] || continue
 
         local card_name
-        card_name=$(basename "$card_dir")
+        card_name="$(basename "$card_dir")"
 
         # Only base cards (card0, card1), not outputs (card0-DP-1)
         [[ "$card_name" =~ ^card[0-9]+$ ]] || continue
 
         local driver_path driver_name
-        driver_path=$(readlink -f "$card_dir/device/driver" 2>/dev/null || echo "unknown")
-        driver_name=$(basename "$driver_path")
+        driver_path="$(readlink -f "$card_dir/device/driver" 2>/dev/null || echo "unknown")"
+        driver_name="$(basename "$driver_path")"
 
         DETECTED_GPUS+=("$card_name:$driver_name")
     done
@@ -1103,13 +1117,17 @@ apply_gpu_env_config() {
             ;;
         amd)
             info "Configuring AMD GPU settings..."
-            sed -i 's/^# set -gx LIBVA_DRIVER_NAME radeonsi/set -gx LIBVA_DRIVER_NAME radeonsi/' "$temp_file" ||
-            { error "Failed to configure AMD GPU settings"; return 1; }
+            if ! sed -i 's/^# set -gx LIBVA_DRIVER_NAME radeonsi/set -gx LIBVA_DRIVER_NAME radeonsi/' "$temp_file"; then
+                error "Failed to configure AMD LIBVA_DRIVER_NAME"
+                return 1
+            fi
             ;;
         intel)
             info "Configuring Intel GPU settings..."
-            sed -i 's/^# set -gx LIBVA_DRIVER_NAME iHD/set -gx LIBVA_DRIVER_NAME iHD/' "$temp_file" ||
-            { error "Failed to configure Intel GPU settings"; return 1; }
+            if ! sed -i 's/^# set -gx LIBVA_DRIVER_NAME iHD/set -gx LIBVA_DRIVER_NAME iHD/' "$temp_file"; then
+                error "Failed to configure Intel LIBVA_DRIVER_NAME"
+                return 1
+            fi
             ;;
         auto|*)
             info "GPU type 'auto' - leaving configuration for runtime detection"
@@ -1124,11 +1142,13 @@ apply_drm_path_config() {
 
     [[ "$DETECTED_DRM_PATH" == "auto" ]] && return 0
 
-    # Validate DRM path contains only safe characters (no newlines, null bytes, or control chars)
-    # Valid paths should match: /run/udev/data/+drm:card0-HDMI-A-1
-    if [[ "$DETECTED_DRM_PATH" =~ [[:cntrl:]] ]] || [[ ! "$DETECTED_DRM_PATH" =~ ^[[:print:]]+$ ]]; then
-        error "DRM path contains invalid characters: $DETECTED_DRM_PATH"
-        echo "  Valid DRM paths should only contain printable characters"
+    # Validate DRM path format strictly (security: prevent sed injection)
+    # Expected format: /run/udev/data/+drm:card0-HDMI-A-1
+    # Allowed characters: alphanumeric, /, +, :, -, _
+    if [[ ! "$DETECTED_DRM_PATH" =~ ^/run/udev/data/\+drm:card[0-9]+-[A-Za-z0-9_-]+$ ]]; then
+        error "DRM path doesn't match expected format: $DETECTED_DRM_PATH"
+        echo "  Expected format: /run/udev/data/+drm:cardN-OUTPUT-NAME"
+        echo "  Example: /run/udev/data/+drm:card0-HDMI-A-1"
         return 1
     fi
 
@@ -1172,7 +1192,7 @@ install_fish_hook() {
 # Install hyprlock as a systemd user service (for UWSM method)
 install_hyprlock_service() {
     local dest_dir
-    dest_dir=$(dirname "$HYPRLOCK_SERVICE_DEST")
+    dest_dir="$(dirname "$HYPRLOCK_SERVICE_DEST")"
 
     if dry_run_preview "Would create: $HYPRLOCK_SERVICE_DEST"; then
         dry_run_preview "Would run: systemctl --user daemon-reload"
@@ -1462,9 +1482,24 @@ setup_tty2_testing() {
     elif systemctl_safe --quiet is-active getty@tty2; then
         info "getty@tty2 already running"
     else
-        warn "Could not start getty@tty2 - you may need to start it manually"
-        warn "Try: sudo systemctl start getty@tty2"
-        return 1
+        echo ""
+        error "Could not start getty@tty2"
+        echo ""
+        echo "  This is required for staged testing. Possible causes:"
+        echo "    • systemd issue (try: sudo systemctl status getty@tty2)"
+        echo "    • Permission issue with sudo"
+        echo "    • getty@tty2 is masked or disabled"
+        echo ""
+        echo "  Manual fix: sudo systemctl start getty@tty2"
+        echo ""
+        if ask "Try to continue anyway? (You can start getty manually)"; then
+            warn "Continuing without getty@tty2 auto-start"
+            warn "Make sure tty2 has a login prompt before testing!"
+            return 0  # Allow continuation but user is warned
+        else
+            info "Aborting - please fix getty@tty2 and re-run installer"
+            return 1
+        fi
     fi
 }
 
@@ -1480,10 +1515,23 @@ guide_tty2_test() {
     echo "    6. Verify desktop appears correctly"
     echo -e "    7. Press ${CYAN}Ctrl+Alt+F1${NC} to return here"
     echo ""
+    echo -e "  ${GREEN}SUCCESS indicators:${NC}"
+    echo "    ✓ tty2 login prompt appears within ~5 seconds"
+    echo "    ✓ After login, you see 'Starting Hyprland...' message"
+    echo "    ✓ hyprlock screen appears (may take 3-5 seconds on first boot)"
+    echo "    ✓ Your password unlocks hyprlock"
+    echo "    ✓ Hyprland desktop renders correctly"
+    echo ""
+    echo -e "  ${RED}FAILURE indicators:${NC}"
+    echo "    ✗ No tty2 login prompt → getty failed to start"
+    echo "    ✗ Login succeeds but black screen → GPU initialization failed"
+    echo "    ✗ hyprlock appears but won't unlock → hyprlock config issue"
+    echo "    ✗ Screen flickers/crashes → check ~/.hyprland.log"
+    echo ""
     echo -e "  ${YELLOW}If the test FAILS:${NC}"
     echo "    • Press Ctrl+C during the 10-second restart delay"
     echo "    • Check ~/.hyprland.log for errors"
-    echo "    • Return here to troubleshoot"
+    echo "    • Return here (Ctrl+Alt+F1) to troubleshoot"
     echo ""
 
     read -r -p "Press Enter when ready to test (then switch to tty2)..."
@@ -1645,9 +1693,10 @@ show_final_instructions() {
     echo ""
 
     if ask "Reboot now?"; then
-        sudo timeout "$REBOOT_TIMEOUT" reboot || {
+        # Use systemctl reboot (cleaner than timeout+reboot, better error messages)
+        sudo systemctl reboot || {
             error "Reboot command failed"
-            echo "  Run manually: sudo reboot"
+            echo "  Run manually: sudo systemctl reboot"
         }
     else
         info "Remember to reboot to apply changes"
@@ -1680,7 +1729,7 @@ uninstall_user_components() {
 
     for dir in "${backup_dirs[@]}"; do
         local parent_dir
-        parent_dir=$(dirname "$dir")
+        parent_dir="$(dirname "$dir")"
         if [[ -d "$parent_dir" ]]; then
             while IFS= read -r -d '' bak_file; do
                 if $DRY_RUN; then
@@ -1760,9 +1809,10 @@ uninstall_maybe_reboot() {
     success "Uninstall complete"
 
     if ask "Reboot now?"; then
-        sudo timeout "$REBOOT_TIMEOUT" reboot || {
+        # Use systemctl reboot (cleaner than timeout+reboot, better error messages)
+        sudo systemctl reboot || {
             error "Reboot command failed"
-            echo "  Run manually: sudo reboot"
+            echo "  Run manually: sudo systemctl reboot"
         }
     fi
 }
@@ -1777,7 +1827,9 @@ uninstall() {
 
     uninstall_detect_method
 
-    if ! ask_yes "Remove all hypr-login components?"; then
+    # Use ask() which defaults to No - prevents accidental uninstall from Enter key
+    # (cat-proof safety: destructive operations should require explicit 'y')
+    if ! ask "Remove all hypr-login components?"; then
         info "Uninstall cancelled"
         exit 0
     fi
@@ -1982,7 +2034,11 @@ install_system_components() {
 
         # Phase 4: Staged testing
         if ! setup_tty2_testing; then
-            warn "Could not auto-start getty@tty2 - manual start may be needed"
+            # User chose not to continue after getty failure
+            echo ""
+            error "Staged testing aborted - cannot proceed without tty2"
+            echo "  Fix the issue and re-run: ./setup.sh"
+            return 1
         fi
         guide_tty2_test
         confirm_test_passed
