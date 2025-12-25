@@ -522,9 +522,11 @@ EOF
 load_install_config() {
     [[ -f "$CONFIG_FILE" ]] || return 1
     [[ -r "$CONFIG_FILE" ]] || { warn "Config file not readable: $CONFIG_FILE"; return 1; }
+    [[ -s "$CONFIG_FILE" ]] || { warn "Config file is empty: $CONFIG_FILE"; return 1; }
 
     # Extract values via grep (safe - no code execution)
     local loaded_session loaded_gpu loaded_drm
+    local values_loaded=0
     loaded_session=$(grep -E "^SESSION_METHOD=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
     loaded_gpu=$(grep -E "^GPU_TYPE=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
     loaded_drm=$(grep -E "^DRM_PATH=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
@@ -532,6 +534,7 @@ load_install_config() {
     # Validate SESSION_METHOD against strict allowlist
     if [[ "$loaded_session" == "exec-once" || "$loaded_session" == "uwsm" ]]; then
         SESSION_METHOD="$loaded_session"
+        ((values_loaded++))
     elif [[ -n "$loaded_session" ]]; then
         warn "Invalid SESSION_METHOD in config: $loaded_session"
     fi
@@ -539,6 +542,7 @@ load_install_config() {
     # Validate GPU_TYPE against known values
     if [[ "$loaded_gpu" =~ ^(nvidia|amd|intel|auto)$ ]]; then
         DETECTED_GPU_TYPE="$loaded_gpu"
+        ((values_loaded++))
     elif [[ -n "$loaded_gpu" ]]; then
         warn "Invalid GPU_TYPE in config: $loaded_gpu"
     fi
@@ -546,12 +550,21 @@ load_install_config() {
     # Validate DRM_PATH format (or auto)
     if [[ "$loaded_drm" == "auto" ]] || [[ "$loaded_drm" =~ ^/run/udev/data/\+drm:card[0-9]+-[A-Za-z0-9_-]+$ ]]; then
         DETECTED_DRM_PATH="$loaded_drm"
+        ((values_loaded++))
     elif [[ -n "$loaded_drm" ]]; then
         warn "Invalid DRM_PATH in config: $loaded_drm"
     fi
 
-    # Return success if at least one value was loaded
-    [[ -n "$SESSION_METHOD" || -n "$DETECTED_GPU_TYPE" || -n "$DETECTED_DRM_PATH" ]]
+    # Return success only if ALL expected values were loaded
+    # Partial loads indicate corruption - better to re-detect than use incomplete config
+    if [[ $values_loaded -eq 3 ]]; then
+        return 0
+    elif [[ $values_loaded -gt 0 ]]; then
+        warn "Config incomplete ($values_loaded/3 values) - will re-detect missing settings"
+        return 0  # Still return success, but user is warned
+    else
+        return 1
+    fi
 }
 
 # ============================================================================
@@ -574,6 +587,15 @@ validate_dependencies() {
     fi
 
     success "All dependencies found (fish, Hyprland, hyprlock)"
+
+    # Verify date supports nanoseconds (used for unique backup filenames)
+    # Some minimal/busybox systems may not support %N
+    local nano_test
+    nano_test=$(date +%N 2>/dev/null) || nano_test=""
+    if [[ -z "$nano_test" ]] || [[ "$nano_test" == "%N" ]] || [[ "$nano_test" == "N" ]]; then
+        warn "System date doesn't support nanoseconds (%N) - backup filenames may collide"
+        echo "  This is usually fine unless you run rapid sequential backups"
+    fi
 }
 
 # Validate a file exists, is non-empty, and is readable
@@ -1318,11 +1340,16 @@ check_hybrid_configuration() {
     case "$choice" in
         1)
             info "Removing hyprlock systemd service..."
-            if systemctl_safe --user disable hyprlock.service 2>/dev/null; then
+            # Use --quiet flag instead of 2>/dev/null to preserve timeout visibility
+            if systemctl_safe --user --quiet disable hyprlock.service; then
                 success "hyprlock.service disabled"
+            else
+                warn "Could not disable hyprlock.service (may not be enabled, or timeout)"
             fi
-            if systemctl_safe --user stop hyprlock.service 2>/dev/null; then
+            if systemctl_safe --user --quiet stop hyprlock.service; then
                 success "hyprlock.service stopped"
+            else
+                info "hyprlock.service not running (already stopped)"
             fi
             return 0  # Continue with exec-once configuration
             ;;
@@ -2083,6 +2110,13 @@ install_detect_system() {
     present_display_options
     present_config_info
     present_session_method
+
+    # Validate SESSION_METHOD was set (defense in depth)
+    if [[ -z "$SESSION_METHOD" ]] || [[ ! "$SESSION_METHOD" =~ ^(exec-once|uwsm)$ ]]; then
+        error "SESSION_METHOD not set or invalid after detection - this is a bug"
+        exit 1
+    fi
+
     present_detection_summary
 
     # Save configuration for future updates (non-fatal if fails)
@@ -2116,7 +2150,7 @@ install_user_components() {
 install_system_components() {
     if request_sudo; then
         CRITICAL_OPERATION="configuring systemd autologin"
-        create_autologin_override || { error "Failed to configure autologin"; return 1; }
+        create_autologin_override || { CRITICAL_OPERATION=""; error "Failed to configure autologin"; return 1; }
         CRITICAL_OPERATION=""
 
         # Phase 4: Staged testing
@@ -2133,7 +2167,7 @@ install_system_components() {
         # Phase 5: SDDM cutover
         confirm_sddm_disable
         CRITICAL_OPERATION="disabling SDDM (display manager)"
-        disable_sddm || { error "Failed to disable SDDM"; return 1; }
+        disable_sddm || { CRITICAL_OPERATION=""; error "Failed to disable SDDM"; return 1; }
         CRITICAL_OPERATION=""
         present_final_instructions
     else
