@@ -395,15 +395,6 @@ remove_if_exists() {
     fi
 }
 
-# Safely remove symlink at destination (TOCTOU mitigation before atomic move)
-remove_symlink_if_exists() {
-    local path="$1"
-    [[ -L "$path" ]] || return 0
-
-    warn "Removing existing symlink at destination: $path"
-    rm -f "$path" || { error "Failed to remove symlink at: $path"; return 1; }
-}
-
 # Validate XDG_RUNTIME_DIR is available for secure temp file handling
 # Returns: 0 if valid, 1 if missing/invalid (with error message)
 validate_xdg_runtime_dir() {
@@ -760,6 +751,7 @@ declare -A GPU_DRIVER_MAP=(
 display_detected_gpus() {
     _GPU_UNKNOWN_DRIVERS=()
     declare -gA _GPU_DRIVER_COUNT=()
+    local -A _unknown_seen=()  # For deduplication (consistent with build_gpu_types_list pattern)
 
     for gpu in "${DETECTED_GPUS[@]}"; do
         local card="${gpu%%:*}"
@@ -774,8 +766,10 @@ display_detected_gpus() {
             echo "    • $card: $label ($driver driver)"
         else
             echo "    • $card: $driver (unknown driver)"
-            if [[ ! " ${_GPU_UNKNOWN_DRIVERS[*]} " =~ \ $driver\  ]]; then
+            # Use associative array for O(1) dedup (consistent with build_gpu_types_list)
+            if [[ ! -v "_unknown_seen[$driver]" ]]; then
                 _GPU_UNKNOWN_DRIVERS+=("$driver")
+                _unknown_seen[$driver]=1
             fi
         fi
     done
@@ -905,11 +899,12 @@ present_display_options() {
     echo ""
 
     while true; do
-        echo -n "  Choose primary display [1-$i]: "
+        echo -n "  Choose primary display [1-$i, blank=auto]: "
         read -r display_choice
 
         if [[ "$display_choice" == "$i" ]] || [[ -z "$display_choice" ]]; then
             DETECTED_DRM_PATH="auto"
+            info "Using auto-detection at boot"
             break
         elif [[ "$display_choice" =~ ^[0-9]+$ ]] && [[ "$display_choice" -ge 1 ]] && [[ "$display_choice" -lt $i ]]; then
             DETECTED_DRM_PATH="${DETECTED_OUTPUTS[$((display_choice-1))]}"
@@ -1103,6 +1098,39 @@ present_detection_summary() {
 # SECTION 13: Installation Functions
 # ============================================================================
 
+# Apply a single GPU environment variable by uncommenting it in the launcher script
+# Args: $1 = temp file, $2 = variable name, $3 = value
+# Returns: 0 on success, 1 on sed failure or if pattern wasn't found/applied
+apply_gpu_variable() {
+    local temp_file="$1"
+    local var_name="$2"
+    local var_value="$3"
+    local pattern="# set -gx $var_name $var_value"
+    local replacement="set -gx $var_name $var_value"
+
+    # Check if pattern exists before attempting substitution
+    if ! grep -q "^$pattern$" "$temp_file" 2>/dev/null; then
+        error "GPU setting not found in launcher: $var_name"
+        echo "  Expected pattern: $pattern"
+        echo "  This may indicate a launcher script version mismatch"
+        return 1
+    fi
+
+    # Apply the substitution
+    if ! sed -i "s/^$pattern$/$replacement/" "$temp_file"; then
+        error "Failed to apply GPU setting: $var_name"
+        return 1
+    fi
+
+    # Verify substitution was applied (pattern should be gone)
+    if grep -q "^$pattern$" "$temp_file" 2>/dev/null; then
+        error "GPU setting was not applied (pattern still present): $var_name"
+        return 1
+    fi
+
+    return 0
+}
+
 # Apply GPU-specific environment variables to launcher script
 # Args: $1 = temp file path
 apply_gpu_env_config() {
@@ -1111,32 +1139,17 @@ apply_gpu_env_config() {
     case "$DETECTED_GPU_TYPE" in
         nvidia)
             info "Configuring NVIDIA GPU settings..."
-            if ! sed -i 's/^# set -gx LIBVA_DRIVER_NAME nvidia/set -gx LIBVA_DRIVER_NAME nvidia/' "$temp_file"; then
-                error "Failed to configure NVIDIA LIBVA_DRIVER_NAME"
-                return 1
-            fi
-            if ! sed -i 's/^# set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/' "$temp_file"; then
-                error "Failed to configure NVIDIA __GLX_VENDOR_LIBRARY_NAME"
-                return 1
-            fi
-            if ! sed -i 's/^# set -gx NVD_BACKEND direct/set -gx NVD_BACKEND direct/' "$temp_file"; then
-                error "Failed to configure NVIDIA NVD_BACKEND"
-                return 1
-            fi
+            apply_gpu_variable "$temp_file" "LIBVA_DRIVER_NAME" "nvidia" || return 1
+            apply_gpu_variable "$temp_file" "__GLX_VENDOR_LIBRARY_NAME" "nvidia" || return 1
+            apply_gpu_variable "$temp_file" "NVD_BACKEND" "direct" || return 1
             ;;
         amd)
             info "Configuring AMD GPU settings..."
-            if ! sed -i 's/^# set -gx LIBVA_DRIVER_NAME radeonsi/set -gx LIBVA_DRIVER_NAME radeonsi/' "$temp_file"; then
-                error "Failed to configure AMD LIBVA_DRIVER_NAME"
-                return 1
-            fi
+            apply_gpu_variable "$temp_file" "LIBVA_DRIVER_NAME" "radeonsi" || return 1
             ;;
         intel)
             info "Configuring Intel GPU settings..."
-            if ! sed -i 's/^# set -gx LIBVA_DRIVER_NAME iHD/set -gx LIBVA_DRIVER_NAME iHD/' "$temp_file"; then
-                error "Failed to configure Intel LIBVA_DRIVER_NAME"
-                return 1
-            fi
+            apply_gpu_variable "$temp_file" "LIBVA_DRIVER_NAME" "iHD" || return 1
             ;;
         auto|*)
             info "GPU type 'auto' - leaving configuration for runtime detection"
@@ -1293,18 +1306,41 @@ check_hybrid_configuration() {
     echo "  Adding exec-once = hyprlock would create a HYBRID configuration"
     echo "  where hyprlock starts TWICE - this will cause problems!"
     echo ""
-    echo "  Options:"
-    echo "    1) Remove the service first: systemctl --user disable hyprlock.service"
-    echo "    2) Or switch to UWSM method: re-run installer and choose option 2"
+    echo "  How would you like to proceed?"
     echo ""
-    if ! ask "Continue anyway? (NOT RECOMMENDED)"; then
-        info "Skipping hyprlock configuration to prevent hybrid setup"
-        echo ""
-        read -r -p "Press Enter to continue..."
-        return 1
-    fi
-    warn "Proceeding with hybrid configuration - you may experience issues"
-    return 0
+    echo "    1) Remove the service now and continue with exec-once method"
+    echo "    2) Skip hyprlock config (keep existing UWSM service)"
+    echo "    3) Continue anyway (NOT RECOMMENDED - will cause conflicts)"
+    echo ""
+    local choice
+    read -r -p "  Enter choice [1-3]: " choice
+
+    case "$choice" in
+        1)
+            info "Removing hyprlock systemd service..."
+            if systemctl_safe --user disable hyprlock.service 2>/dev/null; then
+                success "hyprlock.service disabled"
+            fi
+            if systemctl_safe --user stop hyprlock.service 2>/dev/null; then
+                success "hyprlock.service stopped"
+            fi
+            return 0  # Continue with exec-once configuration
+            ;;
+        2)
+            info "Skipping hyprlock configuration - keeping existing UWSM service"
+            echo ""
+            read -r -p "Press Enter to continue..."
+            return 1  # Skip configuration
+            ;;
+        3)
+            warn "Proceeding with hybrid configuration - you may experience issues"
+            return 0
+            ;;
+        *)
+            info "Invalid choice - skipping hyprlock configuration for safety"
+            return 1
+            ;;
+    esac
 }
 
 # Check if hyprlock is already configured in execs files
@@ -1412,7 +1448,8 @@ request_sudo() {
     echo "    • Reload systemd daemon"
     echo ""
 
-    if ! ask_yes "Proceed with sudo operations?"; then
+    # Use ask() (defaults to No) - system modification requires explicit opt-in
+    if ! ask "Proceed with sudo operations?"; then
         warn "Skipping system-level configuration"
         echo ""
         echo "  You'll need to manually create: $SYSTEMD_OVERRIDE_DEST"
@@ -1436,17 +1473,30 @@ create_autologin_override() {
 
     sudo mkdir -p "$SYSTEMD_OVERRIDE_DIR" || { error "Failed to create systemd override directory"; return 1; }
 
-    # Backup existing override file before modification
+    # Backup existing override file before modification (critical - don't proceed without backup)
     if [[ -f "$SYSTEMD_OVERRIDE_DEST" ]]; then
         local backup_file
-        backup_file="${SYSTEMD_OVERRIDE_DEST}.backup.$(date +%Y%m%d_%H%M%S_%N)" || { warn "Failed to generate backup timestamp"; }
-        sudo cp -p "$SYSTEMD_OVERRIDE_DEST" "$backup_file" || warn "Failed to backup existing override file"
+        backup_file="${SYSTEMD_OVERRIDE_DEST}.backup.$(date +%Y%m%d_%H%M%S_%N)" || {
+            error "Failed to generate backup timestamp"
+            return 1
+        }
+        if ! sudo cp -p "$SYSTEMD_OVERRIDE_DEST" "$backup_file"; then
+            error "Failed to backup existing systemd override - cannot proceed"
+            echo "  Refusing to overwrite $SYSTEMD_OVERRIDE_DEST without backup"
+            return 1
+        fi
         info "Backed up existing config to: $backup_file"
     fi
 
     # Re-validate username immediately before use (defense in depth)
     if ! id "$DETECTED_USERNAME" &>/dev/null; then
         error "Username no longer valid: $DETECTED_USERNAME"
+        return 1
+    fi
+
+    # Security: Block usernames with newlines/carriage returns (could inject systemd directives)
+    if [[ "$DETECTED_USERNAME" == *$'\n'* ]] || [[ "$DETECTED_USERNAME" == *$'\r'* ]]; then
+        error "Username contains invalid control characters"
         return 1
     fi
 
@@ -1504,8 +1554,24 @@ setup_tty2_testing() {
         echo ""
         if ask "Try to continue anyway? (You can start getty manually)"; then
             warn "Continuing without getty@tty2 auto-start"
-            warn "Make sure tty2 has a login prompt before testing!"
-            return 0  # Allow continuation but user is warned
+            echo ""
+            echo "  To start getty manually, run in another terminal:"
+            echo -e "    ${CYAN}sudo systemctl start getty@tty2${NC}"
+            echo ""
+            echo "  Then switch to tty2 (Ctrl+Alt+F2) to verify you see a login prompt."
+            echo ""
+            read -r -p "Press Enter when getty@tty2 is ready..."
+
+            # Verify getty is now running before proceeding
+            if ! systemctl_safe --quiet is-active getty@tty2; then
+                warn "getty@tty2 still not running - testing may fail"
+                if ! ask "Proceed anyway?"; then
+                    return 1
+                fi
+            else
+                success "getty@tty2 is now running"
+            fi
+            return 0
         else
             info "Aborting - please fix getty@tty2 and re-run installer"
             return 1
@@ -1571,9 +1637,16 @@ handle_test_troubleshooting() {
         2)
             if find_editor; then
                 "$FOUND_EDITOR" "$LAUNCHER_DEST" || warn "Editor exited with error"
+                echo ""
+                echo "  Changes saved. You'll need to test again on tty2 to verify the fix."
+                echo "  Note: If Hyprland is running on tty2, logout first to apply changes."
+                echo ""
+                read -r -p "Press Enter when ready to test again..."
+                guide_tty2_test
             else
                 warn "No editor found (tried: \$EDITOR, nano, vim, nvim, vi)"
                 echo "  Edit manually: $LAUNCHER_DEST"
+                read -r -p "Press Enter to continue..."
             fi
             ;;
         3)
@@ -1969,7 +2042,8 @@ install_show_welcome() {
         echo ""
     fi
 
-    if ! ask_yes "Continue with installation?"; then
+    # Use ask() (defaults to No) - installation modifies system, requires explicit opt-in
+    if ! ask "Continue with installation?"; then
         info "Installation cancelled"
         exit 0
     fi
