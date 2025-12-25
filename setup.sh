@@ -70,6 +70,12 @@ UNINSTALL=false
 UPDATE_MODE=false
 SKIP_TEST=false
 
+# Timeouts (seconds) - tune for slow systems if needed
+readonly SYSTEMCTL_DEFAULT_TIMEOUT=5   # Default for systemctl operations
+readonly SYSTEMCTL_VERIFY_TIMEOUT=3    # Quick status/config checks
+readonly SUDO_AUTH_TIMEOUT=60          # Time for user to enter sudo password
+readonly REBOOT_TIMEOUT=30             # Time for reboot command
+
 # Script directory (where this script lives)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -194,7 +200,7 @@ error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 #   systemctl_safe --sudo disable sddm
 #   systemctl_safe --user --quiet is-active hyprlock.service
 systemctl_safe() {
-    local use_user=false use_sudo=false quiet=false timeout_sec=5
+    local use_user=false use_sudo=false quiet=false timeout_sec="$SYSTEMCTL_DEFAULT_TIMEOUT"
     local args=()
 
     # Parse options
@@ -292,6 +298,30 @@ select_from_menu() {
     fi
 }
 
+# Find a working editor: EDITOR env var first, then fallback to common editors
+# Sets: FOUND_EDITOR (global) to the editor command if found
+# Returns: 0 if editor found, 1 if not
+FOUND_EDITOR=""
+find_editor() {
+    FOUND_EDITOR=""
+
+    # Prefer $EDITOR if set and executable
+    if [[ -n "${EDITOR:-}" ]] && command -v "$EDITOR" >/dev/null 2>&1; then
+        FOUND_EDITOR="$EDITOR"
+        return 0
+    fi
+
+    # Fallback to common editors
+    for candidate in nano vim nvim vi; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            FOUND_EDITOR="$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # ============================================================================
 # SECTION 7: Path Normalization
 # ============================================================================
@@ -373,6 +403,56 @@ remove_symlink_if_exists() {
     rm -f "$path" || { error "Failed to remove symlink at: $path"; return 1; }
 }
 
+# Validate XDG_RUNTIME_DIR is available for secure temp file handling
+# Returns: 0 if valid, 1 if missing/invalid (with error message)
+validate_xdg_runtime_dir() {
+    if [[ -z "${XDG_RUNTIME_DIR:-}" ]] || [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+        error "XDG_RUNTIME_DIR not set or invalid - required for secure temp file handling"
+        echo "  This is typically set by systemd-logind on login."
+        return 1
+    fi
+}
+
+# Install a file atomically using temp file + install -T pattern
+# Args: $1 = source, $2 = destination, $3 = mode (e.g., 755), $4 = description
+# Optional: Set INSTALL_CONFIG_FUNC to a function name to call on temp file before install
+# Returns: 0 on success, 1 on failure
+INSTALL_CONFIG_FUNC=""
+install_file_atomically() {
+    local src="$1"
+    local dest="$2"
+    local mode="$3"
+    local desc="${4:-file}"
+    local dest_dir
+
+    dest_dir=$(dirname "$dest")
+
+    if dry_run_preview "Would create: $dest"; then
+        return 0
+    fi
+
+    mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
+    validate_xdg_runtime_dir || return 1
+
+    # Use temp file for atomic operations
+    local temp_file
+    temp_file=$(mktemp "$XDG_RUNTIME_DIR/hypr-login-XXXXXX.tmp") || { error "Failed to create temp file"; return 1; }
+    trap 'rm -f "$temp_file"' RETURN
+
+    cp "$src" "$temp_file" || { error "Failed to copy $desc"; return 1; }
+
+    # Apply optional configuration function
+    if [[ -n "$INSTALL_CONFIG_FUNC" ]]; then
+        "$INSTALL_CONFIG_FUNC" "$temp_file" || return 1
+    fi
+
+    # Install atomically (install -T prevents symlink attacks)
+    install -T -m "$mode" "$temp_file" "$dest" || { error "Failed to install $desc"; return 1; }
+    trap - RETURN  # Clear trap since install succeeded
+
+    success "${desc^} installed: $dest"
+}
+
 # ============================================================================
 # SECTION 9: Installation Detection
 # ============================================================================
@@ -409,7 +489,7 @@ is_fully_installed() {
 }
 
 is_sddm_enabled() {
-    systemctl_safe --timeout=3 --quiet is-enabled sddm
+    systemctl_safe --timeout="$SYSTEMCTL_VERIFY_TIMEOUT" --quiet is-enabled sddm
 }
 
 # Save installation configuration for future updates
@@ -492,36 +572,35 @@ validate_dependencies() {
     success "All dependencies found (fish, Hyprland, hyprlock)"
 }
 
+# Validate a file exists, is non-empty, and is readable
+# Args: $1 = path, $2 = description (optional, defaults to "Source file")
+# Returns: 1 on any failure (with error message), 0 on success
+validate_file() {
+    local path="$1"
+    local desc="${2:-Source file}"
+
+    if [[ ! -f "$path" ]]; then
+        error "$desc not found: $path"
+        return 1
+    fi
+    if [[ ! -s "$path" ]]; then
+        error "$desc is empty: $path"
+        return 1
+    fi
+    if [[ ! -r "$path" ]]; then
+        error "$desc not readable: $path"
+        return 1
+    fi
+}
+
 validate_source_files() {
-    # Check launcher script
-    if [[ ! -f "$LAUNCHER_SRC" ]]; then
-        error "Source file not found: $LAUNCHER_SRC"
+    if ! validate_file "$LAUNCHER_SRC" "Launcher script"; then
         echo "  Make sure you're running from the hypr-login directory"
         exit 1
     fi
-    if [[ ! -s "$LAUNCHER_SRC" ]]; then
-        error "Source file is empty: $LAUNCHER_SRC"
+    if ! validate_file "$FISH_HOOK_SRC" "Fish hook script"; then
         exit 1
     fi
-    if [[ ! -r "$LAUNCHER_SRC" ]]; then
-        error "Source file not readable: $LAUNCHER_SRC"
-        exit 1
-    fi
-
-    # Check fish hook script
-    if [[ ! -f "$FISH_HOOK_SRC" ]]; then
-        error "Source file not found: $FISH_HOOK_SRC"
-        exit 1
-    fi
-    if [[ ! -s "$FISH_HOOK_SRC" ]]; then
-        error "Source file is empty: $FISH_HOOK_SRC"
-        exit 1
-    fi
-    if [[ ! -r "$FISH_HOOK_SRC" ]]; then
-        error "Source file not readable: $FISH_HOOK_SRC"
-        exit 1
-    fi
-
     success "Source files found and verified"
 }
 
@@ -672,7 +751,7 @@ display_detected_gpus() {
             echo "    • $card: $label ($driver driver)"
         else
             echo "    • $card: $driver (unknown driver)"
-            if [[ ! " ${_GPU_UNKNOWN_DRIVERS[*]} " =~ " $driver " ]]; then
+            if [[ ! " ${_GPU_UNKNOWN_DRIVERS[*]} " =~ \ $driver\  ]]; then
                 _GPU_UNKNOWN_DRIVERS+=("$driver")
             fi
         fi
@@ -853,7 +932,7 @@ present_config_info() {
 # Uses timeout to prevent hanging if systemd is unresponsive
 check_uwsm_status() {
     local status
-    status=$(systemctl_safe --user --timeout=3 is-active uwsm-app@Hyprland.service 2>&1) || status="timeout"
+    status=$(systemctl_safe --user --timeout="$SYSTEMCTL_VERIFY_TIMEOUT" is-active uwsm-app@Hyprland.service 2>&1) || status="timeout"
 
     case "$status" in
         active)
@@ -1009,10 +1088,18 @@ apply_gpu_env_config() {
     case "$DETECTED_GPU_TYPE" in
         nvidia)
             info "Configuring NVIDIA GPU settings..."
-            sed -i 's/^# set -gx LIBVA_DRIVER_NAME nvidia/set -gx LIBVA_DRIVER_NAME nvidia/' "$temp_file" &&
-            sed -i 's/^# set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/' "$temp_file" &&
-            sed -i 's/^# set -gx NVD_BACKEND direct/set -gx NVD_BACKEND direct/' "$temp_file" ||
-            { error "Failed to configure NVIDIA GPU settings"; return 1; }
+            if ! sed -i 's/^# set -gx LIBVA_DRIVER_NAME nvidia/set -gx LIBVA_DRIVER_NAME nvidia/' "$temp_file"; then
+                error "Failed to configure NVIDIA LIBVA_DRIVER_NAME"
+                return 1
+            fi
+            if ! sed -i 's/^# set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/set -gx __GLX_VENDOR_LIBRARY_NAME nvidia/' "$temp_file"; then
+                error "Failed to configure NVIDIA __GLX_VENDOR_LIBRARY_NAME"
+                return 1
+            fi
+            if ! sed -i 's/^# set -gx NVD_BACKEND direct/set -gx NVD_BACKEND direct/' "$temp_file"; then
+                error "Failed to configure NVIDIA NVD_BACKEND"
+                return 1
+            fi
             ;;
         amd)
             info "Configuring AMD GPU settings..."
@@ -1037,6 +1124,14 @@ apply_drm_path_config() {
 
     [[ "$DETECTED_DRM_PATH" == "auto" ]] && return 0
 
+    # Validate DRM path contains only safe characters (no newlines, null bytes, or control chars)
+    # Valid paths should match: /run/udev/data/+drm:card0-HDMI-A-1
+    if [[ "$DETECTED_DRM_PATH" =~ [[:cntrl:]] ]] || [[ ! "$DETECTED_DRM_PATH" =~ ^[[:print:]]+$ ]]; then
+        error "DRM path contains invalid characters: $DETECTED_DRM_PATH"
+        echo "  Valid DRM paths should only contain printable characters"
+        return 1
+    fi
+
     info "Setting DRM path: $DETECTED_DRM_PATH"
     # Escape path for sed - handle all special characters
     # Order matters: backslashes first, then other special chars
@@ -1052,70 +1147,26 @@ set -gx HYPR_DRM_PATH \"$escaped_drm_path\"\\
 " "$temp_file" || { error "Failed to set DRM path"; return 1; }
 }
 
-install_launcher_script() {
-    local dest_dir
-    dest_dir=$(dirname "$LAUNCHER_DEST")
-
-    if dry_run_preview "Would create: $LAUNCHER_DEST"; then
-        return 0
-    fi
-
-    mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
-
-    # Require XDG_RUNTIME_DIR for secure temp file handling (set by systemd-logind)
-    if [[ -z "${XDG_RUNTIME_DIR:-}" ]] || [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
-        error "XDG_RUNTIME_DIR not set or invalid - required for secure temp file handling"
-        echo "  This is typically set by systemd-logind on login."
-        return 1
-    fi
-
-    # Use temp file for atomic operations - only install to final destination if all succeeds
-    local temp_file
-    temp_file=$(mktemp "$XDG_RUNTIME_DIR/hypr-login-XXXXXX.tmp") || { error "Failed to create temp file"; return 1; }
-    trap 'rm -f "$temp_file"' RETURN
-
-    # Copy the base script to temp file
-    cp "$LAUNCHER_SRC" "$temp_file" || { error "Failed to copy launcher script"; return 1; }
-
-    # Apply GPU and DRM configurations
+# Configuration function for launcher script (applies GPU and DRM settings)
+# Called by install_file_atomically via INSTALL_CONFIG_FUNC
+configure_launcher_script() {
+    local temp_file="$1"
     apply_gpu_env_config "$temp_file" || return 1
     apply_drm_path_config "$temp_file" || return 1
+}
 
-    # Install atomically with correct permissions (install -T prevents symlink attacks)
-    install -T -m 755 "$temp_file" "$LAUNCHER_DEST" || { error "Failed to install launcher script"; return 1; }
-    trap - RETURN  # Clear the trap since install succeeded
-    success "Launcher script installed: $LAUNCHER_DEST"
+install_launcher_script() {
+    INSTALL_CONFIG_FUNC="configure_launcher_script"
+    install_file_atomically "$LAUNCHER_SRC" "$LAUNCHER_DEST" 755 "launcher script"
+    local result=$?
+    INSTALL_CONFIG_FUNC=""
+    return $result
 }
 
 install_fish_hook() {
-    local dest_dir
-    dest_dir=$(dirname "$FISH_HOOK_DEST")
-
-    if dry_run_preview "Would create: $FISH_HOOK_DEST"; then
-        return 0
-    fi
-
-    mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
-
-    # Require XDG_RUNTIME_DIR for secure temp file handling (set by systemd-logind)
-    if [[ -z "${XDG_RUNTIME_DIR:-}" ]] || [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
-        error "XDG_RUNTIME_DIR not set or invalid - required for secure temp file handling"
-        echo "  This is typically set by systemd-logind on login."
-        return 1
-    fi
-
-    # Use temp file for atomic installation
-    local temp_file
-    temp_file=$(mktemp "$XDG_RUNTIME_DIR/hypr-login-XXXXXX.tmp") || { error "Failed to create temp file"; return 1; }
-    trap 'rm -f "$temp_file"' RETURN
-
-    cp "$FISH_HOOK_SRC" "$temp_file" || { error "Failed to copy fish hook"; return 1; }
-
-    # Install atomically with correct permissions (install -T prevents symlink attacks)
-    install -T -m 644 "$temp_file" "$FISH_HOOK_DEST" || { error "Failed to install fish hook"; return 1; }
-    trap - RETURN  # Clear trap since install succeeded
-
-    success "Fish hook installed: $FISH_HOOK_DEST"
+    # No config function needed for fish hook - just straight copy
+    INSTALL_CONFIG_FUNC=""
+    install_file_atomically "$FISH_HOOK_SRC" "$FISH_HOOK_DEST" 644 "fish hook"
 }
 
 # Install hyprlock as a systemd user service (for UWSM method)
@@ -1151,7 +1202,7 @@ install_hyprlock_service() {
     systemctl_safe --user daemon-reload || { error "Failed to reload user systemd (timeout)"; return 1; }
 
     # Verify service is loadable before enabling
-    if ! systemctl_safe --user --timeout=3 --quiet cat hyprlock.service; then
+    if ! systemctl_safe --user --timeout="$SYSTEMCTL_VERIFY_TIMEOUT" --quiet cat hyprlock.service; then
         error "Systemd cannot load hyprlock.service - check file format"
         return 1
     fi
@@ -1282,15 +1333,15 @@ show_execonce_manual_instructions() {
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
 
-    # Only offer EDITOR if it's set AND executable
-    if [[ -n "${EDITOR:-}" ]] && command -v "$EDITOR" >/dev/null 2>&1 && ask "Open your config in \$EDITOR ($EDITOR)?"; then
+    # Offer to open config in editor if one is available
+    if find_editor && ask "Open your config in editor ($FOUND_EDITOR)?"; then
         if [[ ${#DETECTED_EXECS_FILES[@]} -eq 1 ]]; then
-            "$EDITOR" "${DETECTED_EXECS_FILES[0]}" || warn "Editor exited with error"
+            "$FOUND_EDITOR" "${DETECTED_EXECS_FILES[0]}" || warn "Editor exited with error"
         elif [[ ${#DETECTED_EXECS_FILES[@]} -gt 1 ]]; then
             echo ""
             echo "  Which file to edit?"
             if select_from_menu "Choose" "${DETECTED_EXECS_FILES[@]}"; then
-                "$EDITOR" "$SELECT_RESULT" || warn "Editor exited with error"
+                "$FOUND_EDITOR" "$SELECT_RESULT" || warn "Editor exited with error"
             fi
         fi
     fi
@@ -1340,7 +1391,7 @@ request_sudo() {
     fi
 
     # Test sudo access (with timeout to prevent hang)
-    if ! timeout 60 sudo -v; then
+    if ! timeout "$SUDO_AUTH_TIMEOUT" sudo -v; then
         error "Failed to get sudo access"
         return 1
     fi
@@ -1379,7 +1430,7 @@ EOF
     systemctl_safe --sudo daemon-reload || { error "Failed to reload systemd daemon (timeout)"; return 1; }
 
     # Validate the systemd config can be parsed (catches syntax errors early)
-    if ! systemctl_safe --sudo --timeout=3 --quiet cat getty@tty1.service; then
+    if ! systemctl_safe --sudo --timeout="$SYSTEMCTL_VERIFY_TIMEOUT" --quiet cat getty@tty1.service; then
         warn "Systemd may have issues parsing getty@tty1 config - check manually"
     fi
 
@@ -1460,20 +1511,8 @@ handle_test_troubleshooting() {
             read -r -p "Press Enter to continue..."
             ;;
         2)
-            # Find a working editor: EDITOR, then common defaults
-            local edit_cmd=""
-            if [[ -n "${EDITOR:-}" ]] && command -v "$EDITOR" >/dev/null 2>&1; then
-                edit_cmd="$EDITOR"
-            else
-                for candidate in nano vim nvim vi; do
-                    if command -v "$candidate" >/dev/null 2>&1; then
-                        edit_cmd="$candidate"
-                        break
-                    fi
-                done
-            fi
-            if [[ -n "$edit_cmd" ]]; then
-                "$edit_cmd" "$LAUNCHER_DEST" || warn "Editor exited with error"
+            if find_editor; then
+                "$FOUND_EDITOR" "$LAUNCHER_DEST" || warn "Editor exited with error"
             else
                 warn "No editor found (tried: \$EDITOR, nano, vim, nvim, vi)"
                 echo "  Edit manually: $LAUNCHER_DEST"
@@ -1605,8 +1644,8 @@ show_final_instructions() {
     echo "    • $SYSTEMD_OVERRIDE_DEST"
     echo ""
 
-    if ask_yes "Reboot now?"; then
-        sudo timeout 30 reboot || {
+    if ask "Reboot now?"; then
+        sudo timeout "$REBOOT_TIMEOUT" reboot || {
             error "Reboot command failed"
             echo "  Run manually: sudo reboot"
         }
@@ -1675,38 +1714,25 @@ uninstall_system_component() {
     fi
 }
 
-uninstall() {
-    echo ""
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo -e "  ${BOLD}UNINSTALL hypr-login${NC}"
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo ""
-
-    # Load saved configuration to know which method was used
-    local was_uwsm=false
+# Phase 1: Detect installation method for uninstall
+# Sets: UNINSTALL_WAS_UWSM (true/false)
+UNINSTALL_WAS_UWSM=false
+uninstall_detect_method() {
+    UNINSTALL_WAS_UWSM=false
     if load_install_config && [[ "$SESSION_METHOD" == "uwsm" ]]; then
-        was_uwsm=true
+        UNINSTALL_WAS_UWSM=true
         info "Detected UWSM installation"
     elif is_hyprlock_service_installed; then
-        was_uwsm=true
+        UNINSTALL_WAS_UWSM=true
         info "Detected hyprlock systemd service"
     fi
+}
 
-    if ! ask_yes "Remove all hypr-login components?"; then
-        info "Uninstall cancelled"
-        exit 0
-    fi
-
-    echo ""
-
-    # Remove components
-    uninstall_user_components "$was_uwsm"
-    uninstall_system_component
-
-    # Show remaining manual steps
+# Phase 2: Show manual cleanup steps after uninstall
+uninstall_show_manual_steps() {
     echo ""
     echo -e "  ${YELLOW}Remaining manual steps:${NC}"
-    if $was_uwsm; then
+    if $UNINSTALL_WAS_UWSM; then
         echo "    1. (UWSM method) No manual hyprlock config changes needed"
     else
         echo "    1. Remove 'exec-once = hyprlock' from your execs.conf"
@@ -1714,7 +1740,10 @@ uninstall() {
     echo -e "    2. Re-enable SDDM: ${CYAN}sudo systemctl enable sddm${NC}"
     echo "    3. Reboot"
     echo ""
+}
 
+# Phase 3: Offer to re-enable SDDM
+uninstall_restore_sddm() {
     if ask_yes "Enable SDDM now?"; then
         if $DRY_RUN; then
             echo "$(dry_run_prefix)Would run: sudo systemctl enable sddm"
@@ -1723,16 +1752,43 @@ uninstall() {
             success "SDDM re-enabled"
         fi
     fi
+}
 
+# Phase 4: Offer reboot
+uninstall_maybe_reboot() {
     echo ""
     success "Uninstall complete"
 
-    if ask_yes "Reboot now?"; then
-        sudo timeout 30 reboot || {
+    if ask "Reboot now?"; then
+        sudo timeout "$REBOOT_TIMEOUT" reboot || {
             error "Reboot command failed"
             echo "  Run manually: sudo reboot"
         }
     fi
+}
+
+# Main uninstall orchestrator
+uninstall() {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "  ${BOLD}UNINSTALL hypr-login${NC}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+
+    uninstall_detect_method
+
+    if ! ask_yes "Remove all hypr-login components?"; then
+        info "Uninstall cancelled"
+        exit 0
+    fi
+
+    echo ""
+    uninstall_user_components "$UNINSTALL_WAS_UWSM"
+    uninstall_system_component
+
+    uninstall_show_manual_steps
+    uninstall_restore_sddm
+    uninstall_maybe_reboot
 }
 
 # ============================================================================
@@ -1800,14 +1856,14 @@ update() {
     present_gpu_options
 
     # Install updated files
-    install_launcher_script
-    install_fish_hook
+    install_launcher_script || { error "Failed to update launcher script"; return 1; }
+    install_fish_hook || { error "Failed to update fish hook"; return 1; }
 
     # Update UWSM service if applicable
-    update_hyprlock_service
+    update_hyprlock_service || { error "Failed to update hyprlock service"; return 1; }
 
     # Verify systemd configuration
-    update_systemd_config
+    update_systemd_config || { error "Failed to verify systemd config"; return 1; }
 
     echo ""
     success "Update complete"
@@ -1921,7 +1977,7 @@ install_user_components() {
 install_system_components() {
     if request_sudo; then
         CRITICAL_OPERATION="configuring systemd autologin"
-        create_autologin_override
+        create_autologin_override || { error "Failed to configure autologin"; return 1; }
         CRITICAL_OPERATION=""
 
         # Phase 4: Staged testing
@@ -1934,7 +1990,7 @@ install_system_components() {
         # Phase 5: SDDM cutover
         confirm_sddm_disable
         CRITICAL_OPERATION="disabling SDDM (display manager)"
-        disable_sddm
+        disable_sddm || { error "Failed to disable SDDM"; return 1; }
         CRITICAL_OPERATION=""
         show_final_instructions
     else
