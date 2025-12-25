@@ -91,14 +91,18 @@ LAUNCHER_SRC="$SCRIPT_DIR/scripts/fish/hyprland-tty.fish"
 FISH_HOOK_SRC="$SCRIPT_DIR/scripts/fish/hyprland-autostart.fish"
 
 # Detected values (populated during detection phase)
-DETECTED_USERNAME=""
-DETECTED_GPU_TYPE=""
-DETECTED_GPUS=()
-DETECTED_DRM_PATH=""
-DETECTED_OUTPUTS=()
-DETECTED_EXECS_FILES=()
-HYPRLOCK_CONFIGURED_FILES=()
-HYPR_CONFIG_DIR=""
+# Lifecycle: Set by detect_* functions in install_detect_system()
+#            Consumed by present_* and install_* functions
+#            Persisted to CONFIG_FILE by save_install_config()
+#            Restored by load_install_config() in update mode
+DETECTED_USERNAME=""      # Current username for autologin
+DETECTED_GPU_TYPE=""      # nvidia|amd|intel|auto
+DETECTED_GPUS=()          # Array of "cardN:driver" pairs
+DETECTED_DRM_PATH=""      # auto or /run/udev/data/+drm:cardN-OUTPUT
+DETECTED_OUTPUTS=()       # Array of display output paths
+DETECTED_EXECS_FILES=()   # Array of execs*.conf file paths
+HYPRLOCK_CONFIGURED_FILES=()  # Files already containing hyprlock config
+HYPR_CONFIG_DIR=""        # Path to ~/.config/hypr
 
 # Session method: "exec-once" (TTY/direct) or "uwsm" (systemd service)
 SESSION_METHOD=""
@@ -270,11 +274,9 @@ ask_critical() {
 }
 
 # Display a numbered menu and get user selection
-# Usage: select_from_menu "Choose an option:" "opt1" "opt2" "opt3"
-# Returns: Sets SELECT_RESULT to selected value, SELECT_INDEX to 1-based index
-# Returns 0 on valid selection, 1 on invalid/empty
-SELECT_RESULT=""
-SELECT_INDEX=0
+# Usage: result=$(select_from_menu "Choose:" "opt1" "opt2")
+# Returns: Echoes selected value to stdout, returns 0 on valid selection
+# Note: Menu is displayed to stderr so it shows on screen but isn't captured
 select_from_menu() {
     local prompt="$1"
     shift
@@ -282,20 +284,17 @@ select_from_menu() {
     local i=1
 
     for opt in "${options[@]}"; do
-        echo "    $i) $opt"
+        echo "    $i) $opt" >&2
         ((i++))
     done
-    echo ""
-    echo -n "  $prompt [1-${#options[@]}]: "
+    echo "" >&2
+    echo -n "  $prompt [1-${#options[@]}]: " >&2
     read -r choice
 
     if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#options[@]} ]]; then
-        SELECT_INDEX=$choice
-        SELECT_RESULT="${options[$((choice-1))]}"
+        echo "${options[$((choice-1))]}"  # Output to stdout for capture
         return 0
     else
-        SELECT_INDEX=0
-        SELECT_RESULT=""
         return 1
     fi
 }
@@ -620,8 +619,12 @@ validate_source_files() {
 
 # ============================================================================
 # SECTION 11: System Detection
+# Functions that populate DETECTED_* globals by inspecting the system
 # ============================================================================
 
+# Detect the username for autologin configuration
+# Sets: DETECTED_USERNAME
+# Blocks root execution, handles sudo invocation
 detect_username() {
     # Safety check: block if running as actual root (not via sudo)
     # Use ${SUDO_USER:-} to handle unset variable with set -u
@@ -641,6 +644,8 @@ detect_username() {
     fi
 }
 
+# Detect available GPUs by scanning /sys/class/drm
+# Sets: DETECTED_GPUS (array of "cardN:driver" pairs)
 detect_gpus() {
     DETECTED_GPUS=()
 
@@ -661,6 +666,8 @@ detect_gpus() {
     done
 }
 
+# Detect available display outputs from udev data
+# Sets: DETECTED_OUTPUTS (array of DRM output paths)
 detect_display_outputs() {
     DETECTED_OUTPUTS=()
 
@@ -670,6 +677,8 @@ detect_display_outputs() {
     done
 }
 
+# Detect Hyprland configuration directory and exec configs
+# Sets: HYPR_CONFIG_DIR, DETECTED_EXECS_FILES
 detect_hyprland_config() {
     # Respect XDG_CONFIG_HOME (defaults to ~/.config if not set)
     local config_base="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -1069,7 +1078,7 @@ present_session_method() {
     select_session_method_manual
 }
 
-show_detection_summary() {
+present_detection_summary() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${BOLD}SYSTEM DETECTION SUMMARY${NC}"
@@ -1251,7 +1260,7 @@ remove_hyprlock_service() {
 }
 
 # Show UWSM service confirmation (when using systemd service method)
-show_uwsm_service_configured() {
+present_uwsm_service_configured() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${GREEN}${BOLD}[OK] HYPRLOCK SERVICE CONFIGURED${NC}"
@@ -1326,7 +1335,7 @@ check_existing_hyprlock_config() {
 }
 
 # Show manual exec-once instructions and offer editor
-show_execonce_manual_instructions() {
+present_execonce_manual_instructions() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${BOLD}MANUAL STEP REQUIRED: Add hyprlock to your config${NC}"
@@ -1360,8 +1369,9 @@ show_execonce_manual_instructions() {
         elif [[ ${#DETECTED_EXECS_FILES[@]} -gt 1 ]]; then
             echo ""
             echo "  Which file to edit?"
-            if select_from_menu "Choose" "${DETECTED_EXECS_FILES[@]}"; then
-                "$FOUND_EDITOR" "$SELECT_RESULT" || warn "Editor exited with error"
+            local selected_file
+            if selected_file=$(select_from_menu "Choose" "${DETECTED_EXECS_FILES[@]}"); then
+                "$FOUND_EDITOR" "$selected_file" || warn "Editor exited with error"
             fi
         fi
     fi
@@ -1373,10 +1383,10 @@ show_execonce_manual_instructions() {
 # Show instructions for hyprlock setup based on session method
 # For exec-once: Guide user to add exec-once = hyprlock to config
 # For UWSM: Service is already installed, just confirm
-show_execs_instructions() {
+present_execs_instructions() {
     # UWSM method: Service is already enabled, no manual config needed
     if [[ "$SESSION_METHOD" == "uwsm" ]]; then
-        show_uwsm_service_configured
+        present_uwsm_service_configured
         return
     fi
 
@@ -1384,7 +1394,7 @@ show_execs_instructions() {
     # Check for hybrid configuration and existing config, then show instructions
     check_hybrid_configuration || return
     check_existing_hyprlock_config || return
-    show_execonce_manual_instructions
+    present_execonce_manual_instructions
 }
 
 # ============================================================================
@@ -1670,7 +1680,7 @@ disable_sddm() {
     fi
 }
 
-show_final_instructions() {
+present_final_instructions() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
     echo -e "  ${GREEN}${BOLD}✓ INSTALLATION COMPLETE${NC}"
@@ -1998,7 +2008,7 @@ install_detect_system() {
     present_display_options
     present_config_info
     present_session_method
-    show_detection_summary
+    present_detection_summary
 
     # Save configuration for future updates
     save_install_config
@@ -2022,7 +2032,7 @@ install_user_components() {
     fi
 
     # Show hyprlock setup instructions (conditional on session method)
-    show_execs_instructions
+    present_execs_instructions
 }
 
 # Phase 4-6: System-level installation, testing, and cutover
@@ -2048,7 +2058,7 @@ install_system_components() {
         CRITICAL_OPERATION="disabling SDDM (display manager)"
         disable_sddm || { error "Failed to disable SDDM"; return 1; }
         CRITICAL_OPERATION=""
-        show_final_instructions
+        present_final_instructions
     else
         echo ""
         warn "System-level installation skipped"
