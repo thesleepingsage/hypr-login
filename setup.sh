@@ -157,7 +157,7 @@ cleanup_on_interrupt() {
 }
 
 # Set up trap for common interrupt signals
-trap cleanup_on_interrupt INT TERM
+trap 'cleanup_on_interrupt' INT TERM
 
 # ============================================================================
 # SECTION 5: Concurrent Execution Lock
@@ -336,7 +336,8 @@ normalize_path() {
 backup_file() {
     local file="$1"
     # Use nanoseconds to prevent timestamp collision on rapid calls
-    local backup="${file}.backup.$(date +%Y%m%d_%H%M%S_%N)"
+    local backup
+    backup="${file}.backup.$(date +%Y%m%d_%H%M%S_%N)" || { error "Failed to generate backup timestamp"; return 1; }
 
     if [[ -f "$file" ]]; then
         if dry_run_preview "Would backup: $file → $backup"; then
@@ -651,25 +652,19 @@ declare -A GPU_DRIVER_MAP=(
     [i915]="intel:Intel"
 )
 
-# Classify detected GPUs and display them
-# Sets: GPU_TYPES_IN_ORDER (array of "value:Label" pairs in detection order), GPU_TYPE_COUNT
-# Also warns about unrecognized drivers and duplicate GPU types
-GPU_TYPES_IN_ORDER=()
-GPU_TYPE_COUNT=0
-classify_detected_gpus() {
-    GPU_TYPES_IN_ORDER=()
-    GPU_TYPE_COUNT=0
-    local -A seen=()
-    local -A driver_count=()
-    local unknown_drivers=()
+# Display detected GPUs and show warnings
+# Returns: unknown_drivers array and driver_count associative array via globals
+# Used by: classify_detected_gpus()
+display_detected_gpus() {
+    _GPU_UNKNOWN_DRIVERS=()
+    declare -gA _GPU_DRIVER_COUNT=()
 
-    # First pass: count drivers and display cards
     for gpu in "${DETECTED_GPUS[@]}"; do
         local card="${gpu%%:*}"
         local driver="${gpu##*:}"
 
         # Track driver occurrences for duplicate detection
-        ((driver_count[$driver]++)) || driver_count[$driver]=1
+        ((_GPU_DRIVER_COUNT[$driver]++)) || _GPU_DRIVER_COUNT[$driver]=1
 
         # Display with card number prominently
         if [[ -v "GPU_DRIVER_MAP[$driver]" ]]; then
@@ -677,30 +672,37 @@ classify_detected_gpus() {
             echo "    • $card: $label ($driver driver)"
         else
             echo "    • $card: $driver (unknown driver)"
-            if [[ ! " ${unknown_drivers[*]} " =~ " $driver " ]]; then
-                unknown_drivers+=("$driver")
+            if [[ ! " ${_GPU_UNKNOWN_DRIVERS[*]} " =~ " $driver " ]]; then
+                _GPU_UNKNOWN_DRIVERS+=("$driver")
             fi
         fi
     done
 
     # Warn about unrecognized GPU drivers
-    if [[ ${#unknown_drivers[@]} -gt 0 ]]; then
+    if [[ ${#_GPU_UNKNOWN_DRIVERS[@]} -gt 0 ]]; then
         echo ""
-        warn "Unrecognized GPU driver(s): ${unknown_drivers[*]}"
+        warn "Unrecognized GPU driver(s): ${_GPU_UNKNOWN_DRIVERS[*]}"
         echo "      Known drivers: ${!GPU_DRIVER_MAP[*]}"
         echo "      GPU env vars will use auto-detection for unknown drivers"
     fi
 
     # Check for duplicate GPU types (e.g., two NVIDIA cards)
-    for driver in "${!driver_count[@]}"; do
-        if [[ ${driver_count[$driver]} -gt 1 ]] && [[ -v "GPU_DRIVER_MAP[$driver]" ]]; then
+    for driver in "${!_GPU_DRIVER_COUNT[@]}"; do
+        if [[ ${_GPU_DRIVER_COUNT[$driver]} -gt 1 ]] && [[ -v "GPU_DRIVER_MAP[$driver]" ]]; then
             echo ""
-            info "Multiple ${GPU_DRIVER_MAP[$driver]##*:} GPUs detected (${driver_count[$driver]} cards)"
+            info "Multiple ${GPU_DRIVER_MAP[$driver]##*:} GPUs detected (${_GPU_DRIVER_COUNT[$driver]} cards)"
             echo "      Pay attention to Display Output selection to target the correct card"
         fi
     done
+}
 
-    # Second pass: build selection list
+# Build GPU types list from detected GPUs (pure data transformation)
+# Sets: GPU_TYPES_IN_ORDER (array of "value:Label" pairs in detection order), GPU_TYPE_COUNT
+build_gpu_types_list() {
+    GPU_TYPES_IN_ORDER=()
+    GPU_TYPE_COUNT=0
+    local -A seen=()
+
     for gpu in "${DETECTED_GPUS[@]}"; do
         local driver="${gpu##*:}"
 
@@ -711,6 +713,16 @@ classify_detected_gpus() {
             ((++GPU_TYPE_COUNT))
         fi
     done
+}
+
+# Classify detected GPUs and display them
+# Orchestrates display and classification
+# Sets: GPU_TYPES_IN_ORDER, GPU_TYPE_COUNT
+GPU_TYPES_IN_ORDER=()
+GPU_TYPE_COUNT=0
+classify_detected_gpus() {
+    display_detected_gpus
+    build_gpu_types_list
 }
 
 # Prompt user to select primary GPU when multiple types detected
@@ -789,16 +801,20 @@ present_display_options() {
     done
     echo "    $i) Auto-detect at boot (recommended)"
     echo ""
-    echo -n "  Choose primary display [1-$i]: "
-    read -r display_choice
 
-    if [[ "$display_choice" == "$i" ]] || [[ -z "$display_choice" ]]; then
-        DETECTED_DRM_PATH="auto"
-    elif [[ "$display_choice" =~ ^[0-9]+$ ]] && [[ "$display_choice" -ge 1 ]] && [[ "$display_choice" -lt $i ]]; then
-        DETECTED_DRM_PATH="${DETECTED_OUTPUTS[$((display_choice-1))]}"
-    else
-        DETECTED_DRM_PATH="auto"
-    fi
+    while true; do
+        echo -n "  Choose primary display [1-$i]: "
+        read -r display_choice
+
+        if [[ "$display_choice" == "$i" ]] || [[ -z "$display_choice" ]]; then
+            DETECTED_DRM_PATH="auto"
+            break
+        elif [[ "$display_choice" =~ ^[0-9]+$ ]] && [[ "$display_choice" -ge 1 ]] && [[ "$display_choice" -lt $i ]]; then
+            DETECTED_DRM_PATH="${DETECTED_OUTPUTS[$((display_choice-1))]}"
+            break
+        fi
+        warn "Invalid choice. Please enter 1-$i."
+    done
 
     success "DRM path: $DETECTED_DRM_PATH"
 }
@@ -894,17 +910,10 @@ select_session_method_manual() {
     done
 }
 
-# Present session method selection (UWSM vs exec-once)
-# Auto-detects first, falls back to manual selection if ambiguous
-# Sets: SESSION_METHOD to "exec-once" or "uwsm"
-present_session_method() {
-    echo ""
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo -e "  ${BOLD}SESSION METHOD DETECTION${NC}"
-    echo "═══════════════════════════════════════════════════════════════════"
-    echo ""
-
-    # Try auto-detection first
+# Try to auto-detect and confirm session method with user
+# Returns: 0 if SESSION_METHOD set, 1 if manual selection needed
+# Sets: SESSION_METHOD to "exec-once" or "uwsm" on success
+try_auto_detect_session_method() {
     info "Detecting session method..."
     local uwsm_status
     uwsm_status=$(check_uwsm_status)
@@ -920,7 +929,7 @@ present_session_method() {
                 success "Session method: uwsm"
                 return 0
             fi
-            # User declined auto-detection, fall through to manual selection
+            return 1  # User declined, needs manual selection
             ;;
         inactive|not-found)
             echo ""
@@ -936,17 +945,34 @@ present_session_method() {
                 success "Session method: exec-once"
                 return 0
             fi
-            # User declined auto-detection, fall through to manual selection
+            return 1  # User declined, needs manual selection
             ;;
         failed)
             echo ""
             echo -e "  ${YELLOW}Detected: UWSM service is in failed state${NC}"
             echo "  Cannot reliably auto-detect. Please choose manually."
             echo ""
+            return 1  # Cannot auto-detect, needs manual selection
             ;;
     esac
+    return 1  # Fallback
+}
 
-    # Manual selection (only reached if auto-detect was declined or failed)
+# Present session method selection (UWSM vs exec-once)
+# Auto-detects first, falls back to manual selection if ambiguous
+# Sets: SESSION_METHOD to "exec-once" or "uwsm"
+present_session_method() {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo -e "  ${BOLD}SESSION METHOD DETECTION${NC}"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+
+    # Try auto-detection first, fall back to manual if declined or failed
+    if try_auto_detect_session_method; then
+        return 0
+    fi
+
     select_session_method_manual
 }
 
@@ -1036,9 +1062,16 @@ install_launcher_script() {
 
     mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
 
-    # Use temp file for atomic operations - only move to final destination if all succeeds
+    # Require XDG_RUNTIME_DIR for secure temp file handling (set by systemd-logind)
+    if [[ -z "${XDG_RUNTIME_DIR:-}" ]] || [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+        error "XDG_RUNTIME_DIR not set or invalid - required for secure temp file handling"
+        echo "  This is typically set by systemd-logind on login."
+        return 1
+    fi
+
+    # Use temp file for atomic operations - only install to final destination if all succeeds
     local temp_file
-    temp_file=$(mktemp /tmp/hypr-login-XXXXXX.tmp) || { error "Failed to create temp file"; return 1; }
+    temp_file=$(mktemp "$XDG_RUNTIME_DIR/hypr-login-XXXXXX.tmp") || { error "Failed to create temp file"; return 1; }
     trap 'rm -f "$temp_file"' RETURN
 
     # Copy the base script to temp file
@@ -1048,14 +1081,9 @@ install_launcher_script() {
     apply_gpu_env_config "$temp_file" || return 1
     apply_drm_path_config "$temp_file" || return 1
 
-    chmod +x "$temp_file" || { error "Failed to make script executable"; return 1; }
-
-    # Security: Check for symlink at destination (TOCTOU mitigation)
-    remove_symlink_if_exists "$LAUNCHER_DEST" || return 1
-
-    # Atomic move: only replace destination if all above succeeded
-    mv "$temp_file" "$LAUNCHER_DEST" || { error "Failed to install launcher script"; return 1; }
-    trap - RETURN  # Clear the trap since move succeeded
+    # Install atomically with correct permissions (install -T prevents symlink attacks)
+    install -T -m 755 "$temp_file" "$LAUNCHER_DEST" || { error "Failed to install launcher script"; return 1; }
+    trap - RETURN  # Clear the trap since install succeeded
     success "Launcher script installed: $LAUNCHER_DEST"
 }
 
@@ -1069,19 +1097,23 @@ install_fish_hook() {
 
     mkdir -p "$dest_dir" || { error "Failed to create directory: $dest_dir"; return 1; }
 
+    # Require XDG_RUNTIME_DIR for secure temp file handling (set by systemd-logind)
+    if [[ -z "${XDG_RUNTIME_DIR:-}" ]] || [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+        error "XDG_RUNTIME_DIR not set or invalid - required for secure temp file handling"
+        echo "  This is typically set by systemd-logind on login."
+        return 1
+    fi
+
     # Use temp file for atomic installation
     local temp_file
-    temp_file=$(mktemp /tmp/hypr-login-XXXXXX.tmp) || { error "Failed to create temp file"; return 1; }
+    temp_file=$(mktemp "$XDG_RUNTIME_DIR/hypr-login-XXXXXX.tmp") || { error "Failed to create temp file"; return 1; }
     trap 'rm -f "$temp_file"' RETURN
 
     cp "$FISH_HOOK_SRC" "$temp_file" || { error "Failed to copy fish hook"; return 1; }
 
-    # Security: Check for symlink at destination (TOCTOU mitigation)
-    remove_symlink_if_exists "$FISH_HOOK_DEST" || return 1
-
-    # Atomic move: only replace destination if copy succeeded
-    mv "$temp_file" "$FISH_HOOK_DEST" || { error "Failed to install fish hook"; return 1; }
-    trap - RETURN  # Clear trap since move succeeded
+    # Install atomically with correct permissions (install -T prevents symlink attacks)
+    install -T -m 644 "$temp_file" "$FISH_HOOK_DEST" || { error "Failed to install fish hook"; return 1; }
+    trap - RETURN  # Clear trap since install succeeded
 
     success "Fish hook installed: $FISH_HOOK_DEST"
 }
@@ -1325,7 +1357,8 @@ create_autologin_override() {
 
     # Backup existing override file before modification
     if [[ -f "$SYSTEMD_OVERRIDE_DEST" ]]; then
-        local backup_file="${SYSTEMD_OVERRIDE_DEST}.backup.$(date +%Y%m%d_%H%M%S_%N)"
+        local backup_file
+        backup_file="${SYSTEMD_OVERRIDE_DEST}.backup.$(date +%Y%m%d_%H%M%S_%N)" || { warn "Failed to generate backup timestamp"; }
         sudo cp -p "$SYSTEMD_OVERRIDE_DEST" "$backup_file" || warn "Failed to backup existing override file"
         info "Backed up existing config to: $backup_file"
     fi
@@ -1714,10 +1747,10 @@ update_hyprlock_service() {
     if is_hyprlock_service_installed; then
         info "Updating hyprlock systemd service..."
         backup_file "$HYPRLOCK_SERVICE_DEST"
-        install_hyprlock_service
+        install_hyprlock_service || { error "Failed to update hyprlock service"; return 1; }
     elif [[ "$SESSION_METHOD" == "uwsm" ]]; then
         info "Installing hyprlock systemd service (UWSM method)..."
-        install_hyprlock_service
+        install_hyprlock_service || { error "Failed to install hyprlock service"; return 1; }
     fi
 }
 
@@ -1892,7 +1925,9 @@ install_system_components() {
         CRITICAL_OPERATION=""
 
         # Phase 4: Staged testing
-        setup_tty2_testing
+        if ! setup_tty2_testing; then
+            warn "Could not auto-start getty@tty2 - manual start may be needed"
+        fi
         guide_tty2_test
         confirm_test_passed
 
