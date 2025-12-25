@@ -179,6 +179,7 @@ cleanup_on_interrupt() {
 # Use XDG_RUNTIME_DIR if available (per-user, tmpfs), fallback to /tmp
 LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/hypr-login-install.lock"
 acquire_lock() {
+    # Use high FD 200 to avoid collision with stdin/stdout/stderr and script FDs
     exec 200>"$LOCK_FILE"
     if ! flock -n 200; then
         error "Another hypr-login installation is already running"
@@ -735,6 +736,8 @@ is_hyprlock_running() {
 # SECTION 12: Present Detection Results
 # ============================================================================
 
+# Present detected username and allow user to override
+# Modifies: DETECTED_USERNAME (if user provides alternate)
 present_username() {
     echo ""
     info "Username: $DETECTED_USERNAME"
@@ -768,8 +771,9 @@ declare -A GPU_DRIVER_MAP=(
     [i915]="intel:Intel"
 )
 
-# Display detected GPUs and show warnings
-# Returns: unknown_drivers array and driver_count associative array via globals
+# Display detected GPUs and show warnings for unrecognized drivers
+# Sets: _GPU_UNKNOWN_DRIVERS (array of unrecognized driver names)
+#       _GPU_DRIVER_COUNT (associative array: driver → occurrence count)
 # Used by: classify_detected_gpus()
 display_detected_gpus() {
     _GPU_UNKNOWN_DRIVERS=()
@@ -781,6 +785,7 @@ display_detected_gpus() {
         local driver="${gpu##*:}"
 
         # Track driver occurrences for duplicate detection
+        # Increment existing count, or initialize to 1 if key doesn't exist
         ((_GPU_DRIVER_COUNT[$driver]++)) || _GPU_DRIVER_COUNT[$driver]=1
 
         # Display with card number prominently
@@ -834,9 +839,11 @@ build_gpu_types_list() {
     done
 }
 
-# Classify detected GPUs and display them
-# Orchestrates display and classification
-# Sets: GPU_TYPES_IN_ORDER, GPU_TYPE_COUNT
+# Classify detected GPUs and display them to user
+# Orchestrates: display_detected_gpus() → build_gpu_types_list()
+# Sets: GPU_TYPES_IN_ORDER (array of "value:Label" pairs)
+#       GPU_TYPE_COUNT (number of unique GPU types)
+# Side effects: Also populates _GPU_UNKNOWN_DRIVERS, _GPU_DRIVER_COUNT via display_detected_gpus()
 GPU_TYPES_IN_ORDER=()
 GPU_TYPE_COUNT=0
 classify_detected_gpus() {
@@ -871,6 +878,8 @@ select_primary_gpu() {
     done
 }
 
+# Present GPU detection results and prompt for primary GPU if multiple types found
+# Sets: DETECTED_GPU_TYPE (nvidia|amd|intel|auto)
 present_gpu_options() {
     echo ""
     info "GPU Detection:"
@@ -894,6 +903,8 @@ present_gpu_options() {
     success "GPU type: $DETECTED_GPU_TYPE"
 }
 
+# Present display output options and prompt for selection if multiple found
+# Sets: DETECTED_DRM_PATH (auto or /run/udev/data/+drm:cardN-OUTPUT)
 present_display_options() {
     echo ""
 
@@ -939,6 +950,7 @@ present_display_options() {
     success "DRM path: $DETECTED_DRM_PATH"
 }
 
+# Display Hyprland config info and existing hyprlock status (informational only)
 present_config_info() {
     echo ""
     info "Hyprland config: $HYPR_CONFIG_DIR"
@@ -1096,6 +1108,8 @@ present_session_method() {
     select_session_method_manual
 }
 
+# Display final detection summary and confirm with user before proceeding
+# Exits: If user declines to proceed
 present_detection_summary() {
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
@@ -1707,6 +1721,7 @@ confirm_test_passed() {
     fi
 
     local test_attempts=0
+    # 5 attempts balances user patience with thoroughness - most issues resolve in 2-3 tries
     local max_attempts=5
 
     while true; do
@@ -2207,7 +2222,7 @@ for arg in "$@"; do
         -u|--uninstall) UNINSTALL=true ;;
         -d|--update)    UPDATE_MODE=true ;;
         --skip-test)    SKIP_TEST=true ;;
-        --source-only)  SOURCE_ONLY=true ;;  # For testing: load functions without running
+        --source-only)  SOURCE_ONLY=true ;;  # Internal: load functions for bats testing (not user-facing)
         *)
             error "Unknown option: $arg"
             echo "Use --help for usage information"
