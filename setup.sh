@@ -70,10 +70,11 @@ UNINSTALL=false
 UPDATE_MODE=false
 SKIP_TEST=false
 
-# Timeouts (seconds) - tune for slow systems if needed
-readonly SYSTEMCTL_DEFAULT_TIMEOUT=5   # Default for systemctl operations
-readonly SYSTEMCTL_VERIFY_TIMEOUT=3    # Quick status/config checks
-readonly SUDO_AUTH_TIMEOUT=60          # Time for user to enter sudo password
+# Timeouts (seconds) - override via environment variables for slow systems
+# Example: HYPR_LOGIN_SYSTEMCTL_TIMEOUT=10 ./setup.sh
+readonly SYSTEMCTL_DEFAULT_TIMEOUT="${HYPR_LOGIN_SYSTEMCTL_TIMEOUT:-5}"
+readonly SYSTEMCTL_VERIFY_TIMEOUT="${HYPR_LOGIN_VERIFY_TIMEOUT:-3}"
+readonly SUDO_AUTH_TIMEOUT="${HYPR_LOGIN_SUDO_TIMEOUT:-60}"
 
 # Script directory (where this script lives)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -2220,7 +2221,10 @@ done
 # ============================================================================
 
 # Skip execution when sourced for testing
-$SOURCE_ONLY && return 0 2>/dev/null || $SOURCE_ONLY && exit 0
+# Uses return (for sourced context) with exit fallback (for direct execution)
+if [[ "$SOURCE_ONLY" == "true" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 if $UNINSTALL; then
     uninstall

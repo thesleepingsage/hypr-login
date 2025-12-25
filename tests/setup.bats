@@ -162,3 +162,118 @@ setup() {
     # Should return 0 or 1, not crash
     [[ "$status" -eq 0 || "$status" -eq 1 ]]
 }
+
+# ============================================================================
+# load_install_config tests
+# ============================================================================
+
+@test "load_install_config: returns 1 for missing file" {
+    CONFIG_FILE="/nonexistent/path/config.conf"
+    run load_install_config
+    [[ "$status" -eq 1 ]]
+}
+
+@test "load_install_config: returns 1 for empty file" {
+    local temp_config
+    temp_config=$(mktemp)
+    CONFIG_FILE="$temp_config"
+
+    run load_install_config
+    [[ "$status" -eq 1 ]]
+
+    rm -f "$temp_config"
+}
+
+@test "load_install_config: loads valid exec-once config" {
+    local temp_config
+    temp_config=$(mktemp)
+    cat > "$temp_config" << 'EOF'
+SESSION_METHOD=exec-once
+GPU_TYPE=nvidia
+DRM_PATH=auto
+EOF
+    CONFIG_FILE="$temp_config"
+    SESSION_METHOD=""
+    DETECTED_GPU_TYPE=""
+    DETECTED_DRM_PATH=""
+
+    run load_install_config
+    # Re-source to get the values (run creates subshell)
+    load_install_config
+
+    [[ "$SESSION_METHOD" == "exec-once" ]]
+    [[ "$DETECTED_GPU_TYPE" == "nvidia" ]]
+    [[ "$DETECTED_DRM_PATH" == "auto" ]]
+
+    rm -f "$temp_config"
+}
+
+@test "load_install_config: loads valid uwsm config" {
+    local temp_config
+    temp_config=$(mktemp)
+    cat > "$temp_config" << 'EOF'
+SESSION_METHOD=uwsm
+GPU_TYPE=amd
+DRM_PATH=auto
+EOF
+    CONFIG_FILE="$temp_config"
+    SESSION_METHOD=""
+    DETECTED_GPU_TYPE=""
+    DETECTED_DRM_PATH=""
+
+    load_install_config
+
+    [[ "$SESSION_METHOD" == "uwsm" ]]
+    [[ "$DETECTED_GPU_TYPE" == "amd" ]]
+
+    rm -f "$temp_config"
+}
+
+@test "load_install_config: rejects invalid SESSION_METHOD" {
+    local temp_config
+    temp_config=$(mktemp)
+    cat > "$temp_config" << 'EOF'
+SESSION_METHOD=invalid
+GPU_TYPE=nvidia
+DRM_PATH=auto
+EOF
+    CONFIG_FILE="$temp_config"
+    SESSION_METHOD=""
+
+    load_install_config 2>/dev/null
+
+    # SESSION_METHOD should remain empty (invalid value rejected)
+    [[ -z "$SESSION_METHOD" ]]
+
+    rm -f "$temp_config"
+}
+
+@test "load_install_config: validates DRM_PATH format" {
+    local temp_config
+    temp_config=$(mktemp)
+    cat > "$temp_config" << 'EOF'
+SESSION_METHOD=exec-once
+GPU_TYPE=nvidia
+DRM_PATH=/run/udev/data/+drm:card0-HDMI-A-1
+EOF
+    CONFIG_FILE="$temp_config"
+    DETECTED_DRM_PATH=""
+
+    load_install_config
+
+    [[ "$DETECTED_DRM_PATH" == "/run/udev/data/+drm:card0-HDMI-A-1" ]]
+
+    rm -f "$temp_config"
+}
+
+# ============================================================================
+# Timeout configuration tests
+# ============================================================================
+
+@test "SYSTEMCTL_DEFAULT_TIMEOUT: uses default value" {
+    [[ "$SYSTEMCTL_DEFAULT_TIMEOUT" == "5" ]] || [[ -n "$HYPR_LOGIN_SYSTEMCTL_TIMEOUT" ]]
+}
+
+@test "SYSTEMCTL_VERIFY_TIMEOUT: uses default value" {
+    [[ "$SYSTEMCTL_VERIFY_TIMEOUT" == "3" ]] || [[ -n "$HYPR_LOGIN_VERIFY_TIMEOUT" ]]
+}
