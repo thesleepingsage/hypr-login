@@ -277,3 +277,258 @@ EOF
 @test "SYSTEMCTL_VERIFY_TIMEOUT: uses default value" {
     [[ "$SYSTEMCTL_VERIFY_TIMEOUT" == "3" ]] || [[ -n "$HYPR_LOGIN_VERIFY_TIMEOUT" ]]
 }
+
+# ============================================================================
+# validate_file tests
+# ============================================================================
+
+@test "validate_file: returns 0 for existing readable file" {
+    local temp_file
+    temp_file=$(mktemp)
+    echo "content" > "$temp_file"
+
+    run validate_file "$temp_file" "test file"
+    [[ "$status" -eq 0 ]]
+
+    rm -f "$temp_file"
+}
+
+@test "validate_file: returns 1 for missing file" {
+    run validate_file "/nonexistent/path/file.txt" "test file"
+    [[ "$status" -eq 1 ]]
+}
+
+@test "validate_file: returns 1 for empty file" {
+    local temp_file
+    temp_file=$(mktemp)
+    # File exists but is empty
+
+    run validate_file "$temp_file" "test file"
+    [[ "$status" -eq 1 ]]
+
+    rm -f "$temp_file"
+}
+
+@test "validate_file: uses default description if not provided" {
+    run validate_file "/nonexistent/path/file.txt"
+    [[ "$status" -eq 1 ]]
+    # Should not crash with missing second arg
+}
+
+# ============================================================================
+# collect_gpu_metadata tests
+# ============================================================================
+
+@test "collect_gpu_metadata: counts driver occurrences" {
+    DETECTED_GPUS=("card0:nvidia" "card1:nvidia" "card2:amdgpu")
+    collect_gpu_metadata
+
+    [[ "${_GPU_DRIVER_COUNT[nvidia]}" -eq 2 ]]
+    [[ "${_GPU_DRIVER_COUNT[amdgpu]}" -eq 1 ]]
+}
+
+@test "collect_gpu_metadata: identifies unknown drivers" {
+    DETECTED_GPUS=("card0:nvidia" "card1:virtio_gpu")
+    collect_gpu_metadata
+
+    [[ "${#_GPU_UNKNOWN_DRIVERS[@]}" -eq 1 ]]
+    [[ "${_GPU_UNKNOWN_DRIVERS[0]}" == "virtio_gpu" ]]
+}
+
+@test "collect_gpu_metadata: deduplicates unknown drivers" {
+    DETECTED_GPUS=("card0:virtio_gpu" "card1:virtio_gpu")
+    collect_gpu_metadata
+
+    [[ "${#_GPU_UNKNOWN_DRIVERS[@]}" -eq 1 ]]
+}
+
+@test "collect_gpu_metadata: empty input produces empty output" {
+    DETECTED_GPUS=()
+    collect_gpu_metadata
+
+    [[ "${#_GPU_UNKNOWN_DRIVERS[@]}" -eq 0 ]]
+    [[ "${#_GPU_DRIVER_COUNT[@]}" -eq 0 ]]
+}
+
+# ============================================================================
+# build_gpu_types_list tests
+# ============================================================================
+
+@test "build_gpu_types_list: preserves detection order" {
+    DETECTED_GPUS=("card0:i915" "card1:amdgpu" "card2:nvidia")
+    build_gpu_types_list
+
+    [[ "${GPU_TYPES_IN_ORDER[0]}" == "intel:Intel" ]]
+    [[ "${GPU_TYPES_IN_ORDER[1]}" == "amd:AMD" ]]
+    [[ "${GPU_TYPES_IN_ORDER[2]}" == "nvidia:NVIDIA" ]]
+}
+
+@test "build_gpu_types_list: deduplicates drivers" {
+    DETECTED_GPUS=("card0:nvidia" "card1:nvidia")
+    build_gpu_types_list
+
+    [[ "$GPU_TYPE_COUNT" -eq 1 ]]
+    [[ "${#GPU_TYPES_IN_ORDER[@]}" -eq 1 ]]
+}
+
+@test "build_gpu_types_list: ignores unknown drivers" {
+    DETECTED_GPUS=("card0:virtio_gpu" "card1:nvidia")
+    build_gpu_types_list
+
+    [[ "$GPU_TYPE_COUNT" -eq 1 ]]
+    [[ "${GPU_TYPES_IN_ORDER[0]}" == "nvidia:NVIDIA" ]]
+}
+
+# ============================================================================
+# apply_gpu_variable tests
+# ============================================================================
+
+@test "apply_gpu_variable: uncomments matching pattern" {
+    local temp_file
+    temp_file=$(mktemp)
+    echo "# set -gx LIBVA_DRIVER_NAME nvidia" > "$temp_file"
+    echo "# set -gx OTHER_VAR value" >> "$temp_file"
+
+    run apply_gpu_variable "$temp_file" "LIBVA_DRIVER_NAME" "nvidia"
+    [[ "$status" -eq 0 ]]
+
+    # Verify pattern was uncommented
+    grep -q "^set -gx LIBVA_DRIVER_NAME nvidia$" "$temp_file"
+
+    rm -f "$temp_file"
+}
+
+@test "apply_gpu_variable: fails if pattern not found" {
+    local temp_file
+    temp_file=$(mktemp)
+    echo "set -gx SOME_OTHER_VAR value" > "$temp_file"
+
+    run apply_gpu_variable "$temp_file" "NONEXISTENT_VAR" "value"
+    [[ "$status" -eq 1 ]]
+
+    rm -f "$temp_file"
+}
+
+@test "apply_gpu_variable: preserves other lines unchanged" {
+    local temp_file
+    temp_file=$(mktemp)
+    echo "#!/usr/bin/fish" > "$temp_file"
+    echo "# set -gx LIBVA_DRIVER_NAME nvidia" >> "$temp_file"
+    echo "set -gx EXISTING_VAR value" >> "$temp_file"
+
+    apply_gpu_variable "$temp_file" "LIBVA_DRIVER_NAME" "nvidia"
+
+    # First line unchanged
+    head -1 "$temp_file" | grep -q "#!/usr/bin/fish"
+    # Third line unchanged
+    tail -1 "$temp_file" | grep -q "set -gx EXISTING_VAR value"
+
+    rm -f "$temp_file"
+}
+
+# ============================================================================
+# apply_drm_path_config tests
+# ============================================================================
+
+@test "apply_drm_path_config: skips on auto" {
+    local temp_file
+    temp_file=$(mktemp)
+    echo "#!/usr/bin/fish" > "$temp_file"
+    DETECTED_DRM_PATH="auto"
+
+    run apply_drm_path_config "$temp_file"
+    [[ "$status" -eq 0 ]]
+
+    # File should be unchanged (still 1 line)
+    [[ $(wc -l < "$temp_file") -eq 1 ]]
+
+    rm -f "$temp_file"
+}
+
+@test "apply_drm_path_config: inserts valid DRM path" {
+    local temp_file
+    temp_file=$(mktemp)
+    echo "#!/usr/bin/fish" > "$temp_file"
+    echo "# rest of script" >> "$temp_file"
+    DETECTED_DRM_PATH="/run/udev/data/+drm:card0-HDMI-A-1"
+
+    run apply_drm_path_config "$temp_file"
+    [[ "$status" -eq 0 ]]
+
+    # Should have HYPR_DRM_PATH in file
+    grep -q "HYPR_DRM_PATH" "$temp_file"
+
+    rm -f "$temp_file"
+}
+
+@test "apply_drm_path_config: rejects invalid DRM path format" {
+    local temp_file
+    temp_file=$(mktemp)
+    echo "#!/usr/bin/fish" > "$temp_file"
+    DETECTED_DRM_PATH="/some/invalid/path"
+
+    run apply_drm_path_config "$temp_file"
+    [[ "$status" -eq 1 ]]
+
+    rm -f "$temp_file"
+}
+
+# ============================================================================
+# save_install_config tests
+# ============================================================================
+
+@test "save_install_config: creates config file with correct values" {
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    CONFIG_DIR="$temp_dir"
+    CONFIG_FILE="$temp_dir/install.conf"
+    SESSION_METHOD="exec-once"
+    DETECTED_GPU_TYPE="nvidia"
+    DETECTED_DRM_PATH="auto"
+
+    run save_install_config
+    [[ "$status" -eq 0 ]]
+
+    # Verify file exists and contains expected values
+    [[ -f "$CONFIG_FILE" ]]
+    grep -q "SESSION_METHOD=exec-once" "$CONFIG_FILE"
+    grep -q "GPU_TYPE=nvidia" "$CONFIG_FILE"
+    grep -q "DRM_PATH=auto" "$CONFIG_FILE"
+
+    rm -rf "$temp_dir"
+}
+
+@test "save_install_config: sets restrictive permissions" {
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    CONFIG_DIR="$temp_dir"
+    CONFIG_FILE="$temp_dir/install.conf"
+    SESSION_METHOD="uwsm"
+    DETECTED_GPU_TYPE="amd"
+    DETECTED_DRM_PATH="auto"
+
+    save_install_config
+
+    # File should have 600 permissions
+    local perms
+    perms=$(stat -c %a "$CONFIG_FILE")
+    [[ "$perms" == "600" ]]
+
+    rm -rf "$temp_dir"
+}
+
+@test "save_install_config: creates config directory if missing" {
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    CONFIG_DIR="$temp_dir/nested/subdir"
+    CONFIG_FILE="$CONFIG_DIR/install.conf"
+    SESSION_METHOD="exec-once"
+    DETECTED_GPU_TYPE="intel"
+    DETECTED_DRM_PATH="auto"
+
+    run save_install_config
+    [[ "$status" -eq 0 ]]
+    [[ -d "$CONFIG_DIR" ]]
+
+    rm -rf "$temp_dir"
+}

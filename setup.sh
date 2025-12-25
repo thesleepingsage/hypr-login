@@ -63,23 +63,39 @@ EOF
 # ============================================================================
 # SECTION 2: Configuration & Modes
 # ============================================================================
+#
+# GLOBAL STATE CONTRACT
+# =====================
+# This script uses global variables to pass state between phases. This is
+# intentional for bash scripts of this complexity - it avoids deep parameter
+# passing while remaining testable via --source-only.
+#
+# Categories:
+#   1. Mode flags      - Set by argument parsing, read everywhere
+#   2. Path constants  - Set at init, never modified
+#   3. Detected state  - Set by detect_* functions, consumed by present_*/install_*
+#   4. Scratch state   - Set/cleared within specific functions
+#
+# Testing: Functions can be tested by setting globals before calling them.
+#          See tests/setup.bats for examples.
+# ============================================================================
 
-# Modes
+# --- Mode Flags (set by argument parser, §20) ---
 DRY_RUN=false
 UNINSTALL=false
 UPDATE_MODE=false
 SKIP_TEST=false
 
-# Timeouts (seconds) - override via environment variables for slow systems
-# Example: HYPR_LOGIN_SYSTEMCTL_TIMEOUT=10 ./setup.sh
+# --- Timeouts (configurable via environment) ---
+# Override for slow systems: HYPR_LOGIN_SYSTEMCTL_TIMEOUT=10 ./setup.sh
 readonly SYSTEMCTL_DEFAULT_TIMEOUT="${HYPR_LOGIN_SYSTEMCTL_TIMEOUT:-5}"
 readonly SYSTEMCTL_VERIFY_TIMEOUT="${HYPR_LOGIN_VERIFY_TIMEOUT:-3}"
 readonly SUDO_AUTH_TIMEOUT="${HYPR_LOGIN_SUDO_TIMEOUT:-60}"
 
-# Script directory (where this script lives)
+# --- Path Constants (set at init, never modified) ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Installation paths
+# Installation destinations
 LAUNCHER_DEST="$HOME/.config/hypr/scripts/hyprland-tty.fish"
 FISH_HOOK_DEST="$HOME/.config/fish/conf.d/hyprland-autostart.fish"
 SYSTEMD_OVERRIDE_DIR="/etc/systemd/system/getty@tty1.service.d"
@@ -87,11 +103,13 @@ SYSTEMD_OVERRIDE_DEST="$SYSTEMD_OVERRIDE_DIR/autologin.conf"
 CONFIG_DIR="$HOME/.config/hypr-login"
 CONFIG_FILE="$CONFIG_DIR/install.conf"
 
-# Source files
+# Source files (templates)
 LAUNCHER_SRC="$SCRIPT_DIR/scripts/fish/hyprland-tty.fish"
 FISH_HOOK_SRC="$SCRIPT_DIR/scripts/fish/hyprland-autostart.fish"
+HYPRLOCK_SERVICE_SRC="$SCRIPT_DIR/configs/systemd/user/hyprlock.service"
+HYPRLOCK_SERVICE_DEST="$HOME/.config/systemd/user/hyprlock.service"
 
-# Detected values (populated during detection phase)
+# --- Detected State (populated by §11, consumed by §12-§19) ---
 # Lifecycle: Set by detect_* functions in install_detect_system()
 #            Consumed by present_* and install_* functions
 #            Persisted to CONFIG_FILE by save_install_config()
@@ -104,13 +122,7 @@ DETECTED_OUTPUTS=()       # Array of display output paths
 DETECTED_EXECS_FILES=()   # Array of execs*.conf file paths
 HYPRLOCK_CONFIGURED_FILES=()  # Files already containing hyprlock config
 HYPR_CONFIG_DIR=""        # Path to ~/.config/hypr
-
-# Session method: "exec-once" (TTY/direct) or "uwsm" (systemd service)
-SESSION_METHOD=""
-
-# Hyprlock service paths (for UWSM method)
-HYPRLOCK_SERVICE_SRC="$SCRIPT_DIR/configs/systemd/user/hyprlock.service"
-HYPRLOCK_SERVICE_DEST="$HOME/.config/systemd/user/hyprlock.service"
+SESSION_METHOD=""         # "exec-once" (TTY/direct) or "uwsm" (systemd service)
 
 # ============================================================================
 # SECTION 3: Colors
@@ -409,14 +421,14 @@ validate_xdg_runtime_dir() {
 
 # Install a file atomically using temp file + install -T pattern
 # Args: $1 = source, $2 = destination, $3 = mode (e.g., 755), $4 = description
-# Optional: Set INSTALL_CONFIG_FUNC to a function name to call on temp file before install
+#       $5 = config_func (optional) - function name to call on temp file before install
 # Returns: 0 on success, 1 on failure
-INSTALL_CONFIG_FUNC=""
 install_file_atomically() {
     local src="$1"
     local dest="$2"
     local mode="$3"
     local desc="${4:-file}"
+    local config_func="${5:-}"  # Optional config function
     local dest_dir
 
     dest_dir="$(dirname "$dest")"
@@ -435,9 +447,9 @@ install_file_atomically() {
 
     cp "$src" "$temp_file" || { error "Failed to copy $desc"; return 1; }
 
-    # Apply optional configuration function
-    if [[ -n "$INSTALL_CONFIG_FUNC" ]]; then
-        "$INSTALL_CONFIG_FUNC" "$temp_file" || return 1
+    # Apply optional configuration function (passed as parameter, not global)
+    if [[ -n "$config_func" ]]; then
+        "$config_func" "$temp_file" || return 1
     fi
 
     # Install atomically (install -T prevents symlink attacks)
@@ -487,6 +499,18 @@ is_sddm_enabled() {
 }
 
 # Save installation configuration for future updates
+#
+# Config File Format (~/.config/hypr-login/install.conf):
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │  # hypr-login installation configuration                                   │
+# │  # Generated: <ISO-8601 timestamp>                                        │
+# │  SESSION_METHOD=exec-once     # Values: "exec-once" | "uwsm"              │
+# │  GPU_TYPE=nvidia              # Values: "nvidia" | "amd" | "intel" | "auto"│
+# │  DRM_PATH=auto                # Values: "auto" | /run/udev/data/+drm:...  │
+# └────────────────────────────────────────────────────────────────────────────┘
+#
+# Security: File permissions 600 (user read/write only)
+# Parsing: load_install_config() uses grep extraction (not source) for safety
 save_install_config() {
     if dry_run_preview "Would save config to: $CONFIG_FILE"; then
         return 0
@@ -771,34 +795,43 @@ declare -A GPU_DRIVER_MAP=(
     [i915]="intel:Intel"
 )
 
-# Display detected GPUs and show warnings for unrecognized drivers
+# Collect GPU metadata from DETECTED_GPUS (pure data transformation)
 # Sets: _GPU_UNKNOWN_DRIVERS (array of unrecognized driver names)
 #       _GPU_DRIVER_COUNT (associative array: driver → occurrence count)
-# Used by: classify_detected_gpus()
-display_detected_gpus() {
+# Testable: Yes - no I/O, only data manipulation
+collect_gpu_metadata() {
     _GPU_UNKNOWN_DRIVERS=()
     declare -gA _GPU_DRIVER_COUNT=()
-    local -A _unknown_seen=()  # For deduplication (consistent with build_gpu_types_list pattern)
+    local -A _unknown_seen=()
 
+    for gpu in "${DETECTED_GPUS[@]}"; do
+        local driver="${gpu##*:}"
+
+        # Track driver occurrences for duplicate detection
+        ((_GPU_DRIVER_COUNT[$driver]++)) || _GPU_DRIVER_COUNT[$driver]=1
+
+        # Track unknown drivers (deduplicated)
+        if [[ ! -v "GPU_DRIVER_MAP[$driver]" ]] && [[ ! -v "_unknown_seen[$driver]" ]]; then
+            _GPU_UNKNOWN_DRIVERS+=("$driver")
+            _unknown_seen[$driver]=1
+        fi
+    done
+}
+
+# Display detected GPUs to user (presentation only)
+# Requires: collect_gpu_metadata() must be called first
+# Uses: _GPU_UNKNOWN_DRIVERS, _GPU_DRIVER_COUNT (set by collect_gpu_metadata)
+display_detected_gpus() {
+    # Display each GPU with card number
     for gpu in "${DETECTED_GPUS[@]}"; do
         local card="${gpu%%:*}"
         local driver="${gpu##*:}"
 
-        # Track driver occurrences for duplicate detection
-        # Increment existing count, or initialize to 1 if key doesn't exist
-        ((_GPU_DRIVER_COUNT[$driver]++)) || _GPU_DRIVER_COUNT[$driver]=1
-
-        # Display with card number prominently
         if [[ -v "GPU_DRIVER_MAP[$driver]" ]]; then
             local label="${GPU_DRIVER_MAP[$driver]##*:}"
             echo "    • $card: $label ($driver driver)"
         else
             echo "    • $card: $driver (unknown driver)"
-            # Use associative array for O(1) dedup (consistent with build_gpu_types_list)
-            if [[ ! -v "_unknown_seen[$driver]" ]]; then
-                _GPU_UNKNOWN_DRIVERS+=("$driver")
-                _unknown_seen[$driver]=1
-            fi
         fi
     done
 
@@ -840,13 +873,14 @@ build_gpu_types_list() {
 }
 
 # Classify detected GPUs and display them to user
-# Orchestrates: display_detected_gpus() → build_gpu_types_list()
+# Orchestrates: collect_gpu_metadata() → display_detected_gpus() → build_gpu_types_list()
 # Sets: GPU_TYPES_IN_ORDER (array of "value:Label" pairs)
 #       GPU_TYPE_COUNT (number of unique GPU types)
-# Side effects: Also populates _GPU_UNKNOWN_DRIVERS, _GPU_DRIVER_COUNT via display_detected_gpus()
+# Side effects: Also populates _GPU_UNKNOWN_DRIVERS, _GPU_DRIVER_COUNT via collect_gpu_metadata()
 GPU_TYPES_IN_ORDER=()
 GPU_TYPE_COUNT=0
 classify_detected_gpus() {
+    collect_gpu_metadata
     display_detected_gpus
     build_gpu_types_list
 }
@@ -1227,7 +1261,7 @@ set -gx HYPR_DRM_PATH \"$escaped_drm_path\"\\
 }
 
 # Configuration function for launcher script (applies GPU and DRM settings)
-# Called by install_file_atomically via INSTALL_CONFIG_FUNC
+# Passed to install_file_atomically as config_func parameter
 configure_launcher_script() {
     local temp_file="$1"
     apply_gpu_env_config "$temp_file" || return 1
@@ -1235,16 +1269,11 @@ configure_launcher_script() {
 }
 
 install_launcher_script() {
-    INSTALL_CONFIG_FUNC="configure_launcher_script"
-    install_file_atomically "$LAUNCHER_SRC" "$LAUNCHER_DEST" 755 "launcher script"
-    local result=$?
-    INSTALL_CONFIG_FUNC=""
-    return $result
+    install_file_atomically "$LAUNCHER_SRC" "$LAUNCHER_DEST" 755 "launcher script" configure_launcher_script
 }
 
 install_fish_hook() {
-    # No config function needed for fish hook - just straight copy
-    INSTALL_CONFIG_FUNC=""
+    # No config function needed - just straight copy (5th param omitted)
     install_file_atomically "$FISH_HOOK_SRC" "$FISH_HOOK_DEST" 644 "fish hook"
 }
 
@@ -1655,6 +1684,35 @@ guide_tty2_test() {
     read -r -p "Press Enter when ready to test (then switch to tty2)..."
 }
 
+# Show last N lines of Hyprland log (troubleshooting helper)
+# Args: $1 = number of lines (default: 50)
+show_hyprland_log() {
+    local lines="${1:-50}"
+    echo ""
+    echo "=== Last $lines lines of ~/.hyprland.log ==="
+    tail -"$lines" ~/.hyprland.log 2>/dev/null || echo "(Log file not found)"
+    echo ""
+    read -r -p "Press Enter to continue..."
+}
+
+# Open launcher script in editor for troubleshooting
+# Returns: 0 always (handles editor errors gracefully)
+edit_launcher_troubleshoot() {
+    if find_editor; then
+        "$FOUND_EDITOR" "$LAUNCHER_DEST" || warn "Editor exited with error"
+        echo ""
+        echo "  Changes saved. You'll need to test again on tty2 to verify the fix."
+        echo "  Note: If Hyprland is running on tty2, logout first to apply changes."
+        echo ""
+        read -r -p "Press Enter when ready to test again..."
+        guide_tty2_test
+    else
+        warn "No editor found (tried: \$EDITOR, nano, vim, nvim, vi)"
+        echo "  Edit manually: $LAUNCHER_DEST"
+        read -r -p "Press Enter to continue..."
+    fi
+}
+
 # Handle troubleshooting menu when test fails
 # Returns: 0 to continue testing, 1 to exit installer
 handle_test_troubleshooting() {
@@ -1669,31 +1727,9 @@ handle_test_troubleshooting() {
     read -r trouble_choice
 
     case "$trouble_choice" in
-        1)
-            echo ""
-            echo "=== Last 50 lines of ~/.hyprland.log ==="
-            tail -50 ~/.hyprland.log 2>/dev/null || echo "(Log file not found)"
-            echo ""
-            read -r -p "Press Enter to continue..."
-            ;;
-        2)
-            if find_editor; then
-                "$FOUND_EDITOR" "$LAUNCHER_DEST" || warn "Editor exited with error"
-                echo ""
-                echo "  Changes saved. You'll need to test again on tty2 to verify the fix."
-                echo "  Note: If Hyprland is running on tty2, logout first to apply changes."
-                echo ""
-                read -r -p "Press Enter when ready to test again..."
-                guide_tty2_test
-            else
-                warn "No editor found (tried: \$EDITOR, nano, vim, nvim, vi)"
-                echo "  Edit manually: $LAUNCHER_DEST"
-                read -r -p "Press Enter to continue..."
-            fi
-            ;;
-        3)
-            guide_tty2_test
-            ;;
+        1) show_hyprland_log ;;
+        2) edit_launcher_troubleshoot ;;
+        3) guide_tty2_test ;;
         4)
             info "Exiting - SDDM not modified"
             echo ""
@@ -1701,9 +1737,7 @@ handle_test_troubleshooting() {
             echo "  Fix issues and re-run installer when ready."
             return 1
             ;;
-        *)
-            warn "Invalid choice. Please enter 1-4."
-            ;;
+        *) warn "Invalid choice. Please enter 1-4." ;;
     esac
     return 0
 }
