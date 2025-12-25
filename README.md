@@ -1,5 +1,7 @@
 <h1 align="center">hypr-login</h1>
 
+> **🚧 DEVELOPMENT BRANCH** - This branch (`dev/installer-overhaul`) is receiving rapid updates and is **not stable**. Use at your own risk. For a stable version, switch to the `main` branch.
+
 Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen and no display manager required.
 
 This guide walks you through replacing SDDM (or any display manager) with a simpler boot chain:
