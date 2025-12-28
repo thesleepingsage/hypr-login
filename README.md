@@ -112,7 +112,7 @@ TTY Autologin Way:
 The interactive installer handles detection, configuration, and staged testing:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/hypr-login.git
+git clone https://github.com/thesleepingsage/hypr-login.git
 cd hypr-login
 ./setup.sh
 ```
