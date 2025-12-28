@@ -1,5 +1,7 @@
 <h1 align="center">hypr-login</h1>
 
+> **🚧 DEVELOPMENT BRANCH** - This branch (`dev/installer-overhaul`) is receiving rapid updates and is **not stable**. Use at your own risk. For a stable version, switch to the `main` branch.
+
 Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen and no display manager required.
 
 This guide walks you through replacing SDDM (or any display manager) with a simpler boot chain:
@@ -18,11 +20,16 @@ systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
 
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Session Methods](#session-methods)
+  - [UWSM Service File Details](#uwsm-service-file-details)
 - [Before You Begin: Customization Checklist](#before-you-begin-customization-checklist)
 - [Architecture](#architecture)
   - [Repository Structure](#repository-structure)
   - [Installation Paths](#installation-paths-where-files-end-up)
 - [Implementation](#implementation)
+  - [Installer Modes](#installer-modes)
+  - [Smart Detection](#smart-detection)
   - [Phase 1: Create Launcher Script](#phase-1-create-launcher-script)
   - [Phase 2: Create Fish Login Handler](#phase-2-create-fish-login-handler)
   - [Phase 3: Add hyprlock exec-once](#phase-3-add-hyprlock-exec-once)
@@ -38,6 +45,7 @@ systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
 - [Credential Manager Setup](#credential-manager-setup)
 - [Verification Commands](#verification-commands)
 - [Complete File Contents](#complete-file-contents)
+- [Extras](#extras)
 - [Sources](#sources)
 
 ---
@@ -96,6 +104,125 @@ TTY Autologin Way:
 
 ---
 
+## Quick Start - Note: Installer is new/experimental. Dry run (should?) succeed in most cases, but I am in the process of refactoring it. Manual mode is the safest current method.
+
+> **⚠️ Before running**: This installer modifies your boot process. Ensure you have:
+> - All [prerequisites](#prerequisites) installed
+> - A recovery plan (live USB or familiarity with TTY recovery)
+> - Read the [security considerations](#security-considerations)
+
+The interactive installer handles detection, configuration, and staged testing:
+
+```bash
+git clone https://github.com/YOUR_USERNAME/hypr-login.git
+cd hypr-login
+./setup.sh
+```
+
+**What the installer does:**
+1. Detects your GPU, display outputs, and existing hyprlock configuration
+2. Guides you through session method selection (Direct/TTY or UWSM)
+3. Installs user-level components (scripts, Fish hook)
+4. Walks you through staged testing on tty2 **before** disabling SDDM
+5. Only performs the SDDM cutover after you confirm the test passed
+
+**Other modes:**
+```bash
+./setup.sh -n        # Dry-run: preview all changes without modifying files
+./setup.sh -d        # Update: refresh scripts while preserving your config
+./setup.sh -u        # Uninstall: remove all components, optionally re-enable SDDM
+./setup.sh -h        # Help: show all options
+```
+
+> **Prefer manual installation?** See [Implementation](#implementation) for step-by-step instructions.
+
+---
+
+## Session Methods
+
+The installer supports two methods for starting hyprlock, depending on how you start Hyprland:
+
+### Method 1: exec-once (Direct/TTY Autologin)
+
+This is the **default method** for users who start Hyprland from a TTY (either manually or via autologin).
+
+**How it works:**
+- hyprlock is started via `exec-once = hyprlock` in your Hyprland config
+- It runs as the first thing when Hyprland starts
+- No systemd service needed
+
+**Use this if:**
+- You use this project's TTY autologin setup
+- You start Hyprland from `.bashrc`, `.zshrc`, or Fish config
+- You manually run `Hyprland` from a TTY
+
+### Method 2: UWSM (Systemd Service)
+
+This method is for users who use **UWSM** (Universal Wayland Session Manager) to manage their Hyprland session.
+
+**How it works:**
+- hyprlock runs as a systemd user service (`hyprlock.service`)
+- It starts when `graphical-session.target` is reached
+- Managed entirely by systemd
+
+**Use this if:**
+- You run `uwsm start hyprland` or similar
+- You use a display manager that integrates with UWSM
+- Your Hyprland session is managed by systemd
+
+### How to Choose
+
+The installer will ask you which method to use. If you're unsure:
+
+```bash
+# Check if UWSM is managing your session
+systemctl --user is-active uwsm-app@Hyprland.service
+```
+
+- `active` → You're using UWSM (Method 2)
+- `inactive` or `not found` → You're using Direct/TTY (Method 1)
+
+> **⚠️ Important**: Choosing the wrong method will prevent hyprlock from starting on boot!
+
+> **💡 Tip**: The installer can detect your session method automatically. Run `./setup.sh` and select "I don't know" when prompted—it will check for UWSM and guide you to the correct choice.
+
+### UWSM Service File Details
+
+For UWSM users, the installer creates a systemd user service at `~/.config/systemd/user/hyprlock.service`:
+
+```ini
+[Unit]
+Description=Hyprland screen lock daemon
+Documentation=https://wiki.hyprland.org/Hypr-Ecosystem/hyprlock
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hyprlock
+Restart=no
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+**Key behaviors:**
+- Starts automatically when `graphical-session.target` is reached (Hyprland ready)
+- Only runs if `WAYLAND_DISPLAY` is set (prevents running outside graphical session)
+- Does NOT restart on exit (`Restart=no`) - this is intentional for a lock screen
+
+**Management commands:**
+```bash
+systemctl --user status hyprlock.service   # Check status
+systemctl --user disable hyprlock.service  # Disable auto-start
+systemctl --user enable hyprlock.service   # Re-enable auto-start
+```
+
+> **Important**: Do NOT add `exec-once = hyprlock` to your Hyprland config when using the UWSM method—the systemd service handles startup automatically.
+
+---
+
 ## Before You Begin: Customization Checklist
 
 Before copying any files, you'll need to customize the launcher script for your system. The script is organized into clearly labeled sections:
@@ -131,24 +258,41 @@ for card in /sys/class/drm/card*; test -d $card/device && echo (basename $card):
 
 ### Repository Structure
 
-This repo provides ready-to-use files that you copy to your system:
+This repo provides ready-to-use files:
 
-| Repo Path | Copy To | Purpose |
-|-----------|---------|---------|
-| `scripts/fish/hyprland-tty.fish` | `~/.config/hypr/scripts/` | Main launcher script |
-| `scripts/fish/hyprland-autostart.fish` | `~/.config/fish/conf.d/` | Fish login hook |
-| `configs/systemd/autologin.conf` | `/etc/systemd/system/getty@tty1.service.d/` | Autologin override |
-| `configs/hyprland/execs.conf` | Your Hyprland execs config | hyprlock startup |
-| `contrib/systemd/hyprland.service` | *(Optional, untested)* | Alternative systemd approach |
+| Repo Path | Purpose |
+|-----------|---------|
+| `setup.sh` | Interactive installer with GPU auto-detection and staged testing |
+| `scripts/fish/hyprland-tty.fish` | Main launcher script (DRM wait, env setup) |
+| `scripts/fish/hyprland-autostart.fish` | Fish login hook that triggers the launcher |
+| `configs/systemd/autologin.conf` | Systemd override template for TTY autologin |
+| `configs/systemd/user/hyprlock.service` | UWSM method: hyprlock as systemd user service |
+| `configs/hyprland/execs.conf` | Example exec-once configuration |
+| `USER-JOURNEY.md` | Visual flowcharts of all installer paths (Mermaid) |
+| `contrib/systemd/hyprland.service` | *(Optional, untested)* Alternative systemd approach |
 
 ### Installation Paths (Where Files End Up)
 
+**Core files (all methods):**
+
 | File | Purpose |
 |------|---------|
-| `~/.config/hypr/scripts/hyprland-tty.fish` | Main launcher with env setup, DRM wait, runtime dir wait |
-| `~/.config/fish/conf.d/hyprland-autostart.fish` | Fish login hook that triggers the launcher |
-| `~/.config/hypr/custom.d/regular/execs.conf` (or wherever your custom execs are stored) | Contains `exec-once = hyprlock` at the top |
-| `/etc/systemd/system/getty@tty1.service.d/autologin.conf` | Systemd override for autologin |
+| `~/.config/hypr/scripts/hyprland-tty.fish` | Main launcher with env setup, DRM wait |
+| `~/.config/fish/conf.d/hyprland-autostart.fish` | Fish login hook that triggers launcher |
+| `~/.config/hypr-login/install.conf` | Saved settings (SESSION_METHOD, GPU_TYPE, DRM_PATH) |
+| `/etc/systemd/system/getty@tty1.service.d/autologin.conf` | Systemd autologin override |
+
+**UWSM method only:**
+
+| File | Purpose |
+|------|---------|
+| `~/.config/systemd/user/hyprlock.service` | Systemd user service for hyprlock |
+
+**exec-once method only:**
+
+| File | Purpose |
+|------|---------|
+| Your execs config (e.g., `~/.config/hypr/execs.conf`) | Must contain `exec-once = hyprlock` at the top |
 
 ### Boot Sequence Diagram
 
@@ -180,6 +324,98 @@ Boot → getty autologin → Fish → DRM wait → Hyprland → hyprlock → Des
 ---
 
 ## Implementation
+
+### Installer Modes
+
+The `setup.sh` installer supports several operation modes:
+
+#### Interactive Install (default)
+
+```bash
+./setup.sh
+```
+
+The full installation flow with:
+- **System detection**: GPU type, display outputs, existing hyprlock configuration
+- **Session method selection**: exec-once (manual config) or UWSM (systemd service)
+- **Staged testing**: Test on tty2 before committing to SDDM cutover
+- **Recovery guidance**: Commands to restore SDDM if something goes wrong
+
+#### Dry Run
+
+```bash
+./setup.sh -n
+```
+
+Preview all changes without modifying any files. Shows exactly what would be:
+- Created, copied, or modified
+- Which GPU settings would be applied
+- What systemd commands would run
+
+#### Update
+
+```bash
+./setup.sh -d
+```
+
+Refresh an existing installation:
+- Loads your previous settings from `~/.config/hypr-login/install.conf`
+- Updates scripts from the repo (preserves your GPU/session method choices)
+- Re-detects hardware if settings are missing
+- Updates the UWSM service if applicable
+
+#### Uninstall
+
+```bash
+./setup.sh -u
+```
+
+Remove all hypr-login components:
+- Detects which method you used (exec-once vs UWSM)
+- Removes installed scripts, hooks, and services
+- Optionally removes systemd autologin override (requires sudo)
+- Optionally re-enables SDDM
+- Shows method-specific cleanup instructions
+
+#### Configuration Persistence
+
+The installer saves your choices to `~/.config/hypr-login/install.conf`:
+
+```ini
+# hypr-login installation configuration
+# Generated: 2025-12-24T01:30:00+00:00
+SESSION_METHOD=exec-once
+GPU_TYPE=nvidia
+DRM_PATH=auto
+```
+
+This enables:
+- Seamless updates without re-answering prompts
+- Method-aware uninstall (shows correct cleanup instructions)
+- Hardware re-detection if config is missing
+
+### Smart Detection
+
+The installer performs several detection passes to minimize manual configuration:
+
+**Hardware Detection:**
+- GPU type and driver (`nvidia`, `amdgpu`, `i915`)
+- Display outputs from `/run/udev/data/+drm:*`
+- Multi-GPU systems (prompts for primary GPU selection)
+
+**Configuration Detection:**
+- Finds all `execs*.conf` files in `~/.config/hypr/`
+- **Scans for existing `exec-once = hyprlock`** to prevent duplicates
+- Checks if hyprlock is currently running
+
+**Session Detection:**
+- Checks UWSM status via `systemctl --user is-active uwsm-app@Hyprland.service`
+- Offers guided help flow for users unsure of their setup
+
+If the installer finds hyprlock already configured in your execs files, it will:
+1. Show which files contain the configuration
+2. Ask if you want to add it anyway (warns about duplicates)
+3. Allow you to skip the manual configuration step
 
 ### Phase 1: Create Launcher Script
 
@@ -926,6 +1162,26 @@ The logout action gives you a fresh session with all `exec-once` commands re-run
 
 - **`start-hyprland` wrapper**: Hyprland may introduce a `start-hyprland` wrapper script in the future. If/when this happens, update the launcher script to use it instead of calling `Hyprland` directly.
 - **Environment variables**: As Hyprland evolves, more env vars may be set internally. Check release notes when updating. Currently, Hyprland sets `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, `XDG_BACKEND`, `MOZ_ENABLE_WAYLAND`, `_JAVA_AWT_WM_NONREPARENTING`, `DISPLAY`, and `WAYLAND_DISPLAY` internally.
+
+---
+
+## Extras
+
+The `extras/` folder contains optional utilities that aren't part of the core installation but may be useful for certain setups.
+
+### hyprlock-wrapper
+
+**Location:** [`extras/hyprlock-wrapper/`](extras/hyprlock-wrapper/)
+
+A boot-aware wrapper script that uses different hyprlock configurations for:
+- **Login (first lock after boot)** - Uses a static wallpaper
+- **Manual locks (subsequent)** - Uses `path = screenshot`
+
+**The Problem:** If your `hyprlock.conf` uses `path = screenshot` for the background, the first lock screen after boot has nothing to screenshot - you'll see the default Hyprland wallpaper or a blank screen.
+
+**The Solution:** The wrapper detects boot cycles using the kernel's `boot_id` and switches between two configs automatically.
+
+See [`extras/hyprlock-wrapper/README.md`](extras/hyprlock-wrapper/README.md) for installation instructions.
 
 ---
 
