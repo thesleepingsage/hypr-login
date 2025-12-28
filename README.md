@@ -14,7 +14,7 @@ systemd → getty (autologin) → Fish shell → Hyprland → hyprlock
 
 > **🔧 Customization Required**: The launcher script contains GPU and environment settings that **you must customize for your system**. The script has sensible defaults commented out - you'll need to uncomment the lines matching YOUR GPU (NVIDIA, AMD, or Intel) and optionally configure theme preferences. **Do not blindly copy the script without reading the comments!**
 
-> **🧪 Experimental**: This project is under active development. The manual installation steps below are the most reliable method. An interactive installer (`setup.sh`) exists on the `feature/uwsm-extras` branch but is still being refined.
+> **🧪 Experimental**: This project is under active development. The manual installation steps below are the most reliable method. An interactive installer (`setup.sh`) exists but is still being refined.
 
 ## Table of Contents
 
