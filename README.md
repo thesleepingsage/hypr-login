@@ -102,7 +102,7 @@ TTY Autologin Way:
 
 ---
 
-## Quick Start - Note: Installer is new/experimental. Dry run (should?) succeed in most cases, but I am in the process of refactoring it. Manual mode is the safest current method.
+## Quick Start - Note: Installer is new/experimental. Dry run should succeed in most cases, but manual mode is the safest current method.
 
 > **⚠️ Before running**: This installer modifies your boot process. Ensure you have:
 > - All [prerequisites](#prerequisites) installed
