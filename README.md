@@ -7,7 +7,7 @@ Boot directly into Hyprland from TTY autologin, using hyprlock as your login scr
 > hypr-login uses `start-hyprland` for crash recovery and safe mode.
 > This feature was introduced in Hyprland 0.53. Earlier versions are not supported.
 >
-> **Upgrading from Hyprland 0.52.x?** If you're upgrading Hyprland to 0.53+, you'll need to update hypr-login too (run `./setup.sh -d` to refresh your scripts). If you're staying on 0.52.x, keep using your current hypr-login installation—don't update.
+> **Upgrading from Hyprland 0.52.x?** If you're upgrading Hyprland to 0.53+, you'll need to update hypr-login too (run `./setup.sh -d` to refresh your scripts). If you're staying on 0.52.x, keep using your current hypr-login installation and don't update.
 
 This guide walks you through replacing SDDM (or any display manager) with a simpler boot chain:
 
