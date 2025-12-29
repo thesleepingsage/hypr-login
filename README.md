@@ -2,6 +2,11 @@
 
 Boot directly into Hyprland from TTY autologin, using hyprlock as your login screen and no display manager required.
 
+> **⚠️ Requires Hyprland 0.53+**
+>
+> hypr-login uses `start-hyprland` for crash recovery and safe mode.
+> This feature was introduced in Hyprland 0.53. Earlier versions are not supported.
+
 This guide walks you through replacing SDDM (or any display manager) with a simpler boot chain:
 
 ```
@@ -73,7 +78,7 @@ TTY Autologin Way:
       → hyprland-autostart.fish → hyprland-tty.fish
           → Wait for DRM/GPU ready
           → Set environment variables
-          → Launch Hyprland
+          → Launch start-hyprland (watchdog with crash recovery)
               → exec-once = hyprlock (immediate lock)
               → User unlocks → Desktop
 ```
@@ -94,7 +99,7 @@ TTY Autologin Way:
 
 | Requirement | Notes |
 |-------------|-------|
-| Hyprland | Tested with 0.52.2+ |
+| Hyprland | **0.53+** required (uses `start-hyprland` watchdog) |
 | hyprlock | Tested with 0.9.2+ |
 | Fish shell | Primary shell (bash/zsh possible with modifications) |
 | systemd | For getty and autologin |
@@ -574,10 +579,11 @@ set -gx ELECTRON_OZONE_PLATFORM_HINT wayland  # or "auto" if you have issues
 # set -gx QT_QPA_PLATFORMTHEME kde  # Options: kde, qt5ct, qt6ct
 
 # ──────────────────────────────────────────────────────────────────
-# Launch Hyprland
+# Launch Hyprland via start-hyprland watchdog (0.53+)
+# start-hyprland provides crash recovery and safe mode
 # ──────────────────────────────────────────────────────────────────
-echo "Starting Hyprland..."
-Hyprland 2>&1 | tee ~/.hyprland.log
+echo "Starting Hyprland via start-hyprland..."
+start-hyprland 2>&1 | tee ~/.hyprland.log
 set -l exit_code $pipestatus[1]
 echo "Hyprland exited with code: $exit_code"
 echo "Press Enter to continue..."
@@ -596,38 +602,19 @@ Create `~/.config/fish/conf.d/hyprland-autostart.fish`:
 
 ```fish
 # Hyprland TTY Autostart
-# Auto-launches Hyprland on tty1/tty2 login, handles crashes gracefully
+# Auto-launches Hyprland on tty1/tty2 login via start-hyprland watchdog
+#
+# Note: start-hyprland (Hyprland 0.53+) handles crash recovery and safe mode
+# internally, so we no longer need a restart loop here.
 
 # Only on login shell, on tty1 or tty2
 if status is-login
-    set TTY (tty)
-    if string match -q '/dev/tty1' $TTY; or string match -q '/dev/tty2' $TTY
-        echo "=== TTY Autostart: Launching Hyprland ==="
-
-        # Attempt to start Hyprland
+    set -l tty (tty)
+    if string match -q '/dev/tty1' $tty; or string match -q '/dev/tty2' $tty
+        echo "=== TTY Autostart: Launching Hyprland via start-hyprland ==="
         ~/.config/hypr/scripts/hyprland-tty.fish
-
-        # If we get here, Hyprland exited/crashed
-        set EXIT_CODE $status
-
-        if test $EXIT_CODE -eq 0
-            # Clean exit (user logged out) - restart immediately
-            echo "Hyprland exited cleanly, restarting..."
-            exit 0
-        else
-            # Crash or error - give time to read
-            echo ""
-            echo "========================================="
-            echo "Hyprland CRASHED with code: $EXIT_CODE"
-            echo "========================================="
-            echo ""
-            echo "Check ~/.hyprland.log for details"
-            echo ""
-            echo "Restarting in 10 seconds..."
-            echo "(Press Ctrl+C to stay in TTY)"
-            sleep 10
-            exit 0
-        end
+        # start-hyprland handles crash recovery internally
+        # If we get here, start-hyprland exited cleanly (user logged out)
     end
 end
 ```
@@ -1083,38 +1070,23 @@ See the full script in `scripts/fish/hyprland-tty.fish` or the [Phase 1](#phase-
 
 ```fish
 # Hyprland TTY Autostart
-# Auto-launches Hyprland on tty1/tty2 login, handles crashes gracefully
+# Auto-launches Hyprland on tty1/tty2 login via start-hyprland watchdog
+#
+# Installation:
+#   Copy to ~/.config/fish/conf.d/hyprland-autostart.fish
+#   (Fish automatically sources files in conf.d/)
+#
+# Note: start-hyprland (Hyprland 0.53+) handles crash recovery and safe mode
+# internally, so we no longer need a restart loop here.
 
 # Only on login shell, on tty1 or tty2
 if status is-login
-    set TTY (tty)
-    if string match -q '/dev/tty1' $TTY; or string match -q '/dev/tty2' $TTY
-        echo "=== TTY Autostart: Launching Hyprland ==="
-
-        # Attempt to start Hyprland
+    set -l tty (tty)
+    if string match -q '/dev/tty1' $tty; or string match -q '/dev/tty2' $tty
+        echo "=== TTY Autostart: Launching Hyprland via start-hyprland ==="
         ~/.config/hypr/scripts/hyprland-tty.fish
-
-        # If we get here, Hyprland exited/crashed
-        set EXIT_CODE $status
-
-        if test $EXIT_CODE -eq 0
-            # Clean exit (user logged out) - restart immediately
-            echo "Hyprland exited cleanly, restarting..."
-            exit 0
-        else
-            # Crash or error - give time to read
-            echo ""
-            echo "========================================="
-            echo "Hyprland CRASHED with code: $EXIT_CODE"
-            echo "========================================="
-            echo ""
-            echo "Check ~/.hyprland.log for details"
-            echo ""
-            echo "Restarting in 10 seconds..."
-            echo "(Press Ctrl+C to stay in TTY)"
-            sleep 10
-            exit 0
-        end
+        # start-hyprland handles crash recovery internally
+        # If we get here, start-hyprland exited cleanly (user logged out)
     end
 end
 ```
@@ -1158,7 +1130,6 @@ The logout action gives you a fresh session with all `exec-once` commands re-run
 
 ## Future Considerations
 
-- **`start-hyprland` wrapper**: Hyprland may introduce a `start-hyprland` wrapper script in the future. If/when this happens, update the launcher script to use it instead of calling `Hyprland` directly.
 - **Environment variables**: As Hyprland evolves, more env vars may be set internally. Check release notes when updating. Currently, Hyprland sets `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, `XDG_BACKEND`, `MOZ_ENABLE_WAYLAND`, `_JAVA_AWT_WM_NONREPARENTING`, `DISPLAY`, and `WAYLAND_DISPLAY` internally.
 
 ---
@@ -1194,6 +1165,6 @@ See [`extras/hyprlock-wrapper/README.md`](extras/hyprlock-wrapper/README.md) for
 
 ---
 
-*Last updated: 2025-12-23*
-*Tested on: Arch Linux, Hyprland 0.52.2, Fish 3.x, NVIDIA GPU*
+*Last updated: 2025-12-29*
+*Tested on: Arch Linux, Hyprland 0.53+, Fish 3.x, NVIDIA GPU*
 *AMD/Intel GPUs: Untested - feedback welcome!*

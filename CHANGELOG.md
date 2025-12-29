@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: Now requires Hyprland 0.53+ (uses `start-hyprland` watchdog)
+- Launcher script (`hyprland-tty.fish`) now calls `start-hyprland` instead of `Hyprland` directly
+- Simplified autostart hook (`hyprland-autostart.fish`) - crash recovery now handled by `start-hyprland`
+
 ### Added
 
+- Version check in installer that blocks installation on Hyprland <0.53
 - Interactive installer (`setup.sh`) with detect + present options pattern
 - UWSM session method support alongside exec-once method
 - hyprlock-wrapper extras for boot-aware hyprlock configurations

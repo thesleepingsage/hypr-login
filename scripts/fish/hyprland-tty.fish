@@ -170,9 +170,10 @@ set -gx ELECTRON_OZONE_PLATFORM_HINT wayland  # or "auto" if you have issues
 # Qt theming - only if you have kde/qt5ct/qt6ct installed
 # set -gx QT_QPA_PLATFORMTHEME kde  # Options: kde, qt5ct, qt6ct
 
-# Launch Hyprland - capture output for debugging
-echo "Starting Hyprland..."
-Hyprland 2>&1 | tee ~/.hyprland.log
+# Launch Hyprland via start-hyprland watchdog (0.53+)
+# start-hyprland provides crash recovery and safe mode
+echo "Starting Hyprland via start-hyprland..."
+start-hyprland 2>&1 | tee ~/.hyprland.log
 set -l exit_code $pipestatus[1]
 echo "Hyprland exited with code: $exit_code"
 echo "Press Enter to continue..."

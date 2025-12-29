@@ -624,6 +624,40 @@ validate_dependencies() {
     fi
 }
 
+# Check Hyprland version meets minimum requirement (0.53+)
+# start-hyprland watchdog was introduced in Hyprland 0.53
+validate_hyprland_version() {
+    local version major minor
+
+    # Parse version from "Hyprland X.Y.Z ..." output
+    version=$(Hyprland --version 2>/dev/null | grep -oP '^\s*Hyprland\s+\K[0-9]+\.[0-9]+' | head -1)
+
+    if [[ -z "$version" ]]; then
+        warn "Could not detect Hyprland version"
+        echo "  hypr-login requires Hyprland 0.53+ for start-hyprland support"
+        if ! ask "Continue anyway?"; then
+            exit 1
+        fi
+        return 0
+    fi
+
+    IFS='.' read -r major minor <<< "$version"
+
+    if [[ "$major" -eq 0 && "$minor" -lt 53 ]]; then
+        error "Hyprland $version detected. hypr-login requires Hyprland 0.53+"
+        echo ""
+        echo "  hypr-login uses start-hyprland for crash recovery and safe mode,"
+        echo "  which was introduced in Hyprland 0.53."
+        echo ""
+        echo "  Please upgrade Hyprland before installing hypr-login."
+        echo "  See: https://wiki.hyprland.org/Getting-Started/Installation/"
+        echo ""
+        exit 1
+    fi
+
+    success "Hyprland $version detected (0.53+ required)"
+}
+
 # Validate a file exists, is non-empty, and is readable
 # Args: $1 = path, $2 = description (optional, defaults to "Source file")
 # Returns: 1 on any failure (with error message), 0 on success
@@ -2132,6 +2166,7 @@ install_preflight_checks() {
     echo ""
     info "Running pre-flight checks..."
     validate_dependencies
+    validate_hyprland_version
     validate_source_files
 
     if is_fully_installed; then
